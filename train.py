@@ -36,6 +36,7 @@ from jax.nn import dot_product_attention
 import einops
 
 import pickle
+import json
 
 import numpy as np
 
@@ -170,6 +171,26 @@ class Logger:
             pickle.dump(state_to_save, f)
 
         self.msg(f"Saved checkpoint to {save_path}")
+
+
+class GradNormDiagnostics:
+    # Diagnostic-only hook: records the global gradient L2 norm each step and
+    # writes the series to a standalone JSON file (separate from logs/).
+    # Has no effect on training.
+    def __init__(self, logger: Logger):
+        self.is_master = logger.is_master
+        self.run_id = logger.run_id
+        self.path = "grad_norm_diag.json"
+        self.records = []
+
+    def record(self, step: int, grad_norm: float):
+        if not self.is_master:
+            return
+        self.records.append({"step": step, "grad_norm": grad_norm})
+        tmp_path = self.path + ".tmp"
+        with open(tmp_path, "w") as f:
+            json.dump({"run_id": self.run_id, "grad_norms": self.records}, f)
+        os.replace(tmp_path, self.path)
 
 
 def filter_pytree(pytree: PyTree, condition_map: Any) -> PyTree | None:
@@ -907,7 +928,15 @@ def train_step(
         lambda g: (g / n_grad_acc_steps).astype(g.dtype), final_grads_accum
     )
     new_params, new_opt_state = optimizer.update(final_grads, params, opt_state)
-    return new_params, new_opt_state, {"loss": avg_loss}
+    # Diagnostic only: global L2 norm of the averaged gradients (float32 to
+    # avoid bfloat16 overflow in the squared sum). Not used by the update.
+    grad_norm = jnp.sqrt(
+        sum(
+            jnp.sum(jnp.square(g.astype(jnp.float32)))
+            for g in tree_leaves(final_grads)
+        )
+    )
+    return new_params, new_opt_state, {"loss": avg_loss, "grad_norm": grad_norm}
 
 
 def eval_step(
@@ -964,6 +993,7 @@ def run_evaluation(
 
 def train_loop(config: Config):
     logger = Logger()
+    grad_diag = GradNormDiagnostics(logger)
     mesh = get_mesh(config)
 
     with mesh:
@@ -1011,6 +1041,9 @@ def train_loop(config: Config):
             # Read loss from local addressable shard (replicated scalar; no
             # cross-host gather). Forces a host sync, which also paces the loop.
             loss_val = float(np.asarray(metrics["loss"].addressable_data(0)))
+            grad_diag.record(
+                step, float(np.asarray(metrics["grad_norm"].addressable_data(0)))
+            )
             now = time.time()
             step_secs = now - last_step_time
             last_step_time = now
