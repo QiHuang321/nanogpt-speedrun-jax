@@ -247,7 +247,7 @@ class Config:
     adam_embed_beta1: float = 0.9
     adam_embed_beta2: float = 0.95
 
-    # adam for lm head
+    # adam for lm head (unused: lm head is tied to wte and trained by adam_embed)
     adam_lm_head_base_lr: float = 0.008
     adam_lm_head_beta1: float = 0.9
     adam_lm_head_beta2: float = 0.95
@@ -478,9 +478,6 @@ def multi_optimizer(optimizer_map: Any, **optimizers: Optimizer):
 def create_optimizer_map(params):
     def get_label(path, leaf):
         is_adam_embed = any(isinstance(k, DictKey) and k.key == "wte" for k in path)
-        is_adam_lm_head = any(
-            isinstance(k, DictKey) and k.key == "lm_head" for k in path
-        )
         is_muon = (
             any(isinstance(k, DictKey) and k.key == "h" for k in path)
             and leaf.ndim == 2
@@ -492,15 +489,12 @@ def create_optimizer_map(params):
         )
         assert (
             int(is_adam_embed)
-            + int(is_adam_lm_head)
             + int(is_muon)
             + int(is_adam_nonmat)
             == 1
         )
         if is_adam_embed:
             return "adam_embed"
-        elif is_adam_lm_head:
-            return "adam_lm_head"
         elif is_muon:
             return "muon"
         else:
@@ -686,10 +680,10 @@ def init_params(config: Config, mesh: Mesh) -> PyTree:
     key = map(partial(jax.random.fold_in, root_key), itertools.count())
 
     params = dict()
+    # wte is tied with the lm head: gpt_forward reuses it (transposed) for logits
     params["wte"] = sharded_normal(next(key), (config.vocab_size, config.d_model), 1.0)
     params["h"] = []
     params["skip_weights"] = sharded_ones(config.n_layers // 2)
-    params["lm_head"] = sharded_zeros((config.d_model, config.vocab_size))
 
     for i in range(config.n_layers):
         block_params = dict()
@@ -735,16 +729,6 @@ def init_optimizer(config: Config, params: PyTree, mesh: Mesh):
         config.adam_eps,
     )
 
-    adam_lm_head = adam(
-        config.adam_lm_head_base_lr,
-        config.adam_lm_head_beta1,
-        config.adam_lm_head_beta2,
-        config.n_warmup_iters,
-        config.n_warmdown_iters,
-        config.n_train_iters,
-        config.adam_eps,
-    )
-
     adam_nonmat = adam(
         config.adam_nonmat_base_lr,
         config.adam_nonmat_beta1,
@@ -770,7 +754,6 @@ def init_optimizer(config: Config, params: PyTree, mesh: Mesh):
     optimizer = multi_optimizer(
         optimizer_map,
         adam_embed=adam_embed,
-        adam_lm_head=adam_lm_head,
         muon=muon_opt,
         adam_nonmat=adam_nonmat,
     )
@@ -856,7 +839,7 @@ def gpt_forward(params, idx, precomputed_params, config):
             params["h"][n_encoder_layers + i], x, v1, x0, cos, sin, config
         )
     x = rms_norm(x, config)
-    logits = linear(x, params["lm_head"])
+    logits = linear(x, params["wte"].T)
     logits = (2.0 * config.logit_softcap) * jax.nn.sigmoid(
         logits / (config.logit_softcap / 2.0)
     )
