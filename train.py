@@ -220,6 +220,13 @@ class Config:
     val_tokens: int = 10485760
     save_every: int = 0
 
+    # intermediate evaluation points: extra val-loss measurements at these
+    # fractions of n_train_iters, between the regular val_loss_every evals.
+    # Log-only — they never feed early stopping or any schedule, so the
+    # training path is identical to a run without them.
+    eval_frac_points: tuple[float, ...] = (0.25, 0.5, 0.75)
+    intermediate_eval_steps: tuple[int, ...] = ()
+
     # Speedrun track configuration:
     #   - main track (default): run for n_train_iters steps, report final val_loss.
     #   - optimization track: stop as soon as val_loss <= target_val_loss is hit
@@ -285,6 +292,13 @@ class Config:
 
         object.__setattr__(
             self, "n_warmdown_iters", int(self.n_train_iters * self.f_warmdown_iters)
+        )
+        object.__setattr__(
+            self,
+            "intermediate_eval_steps",
+            tuple(
+                sorted({int(f * self.n_train_iters) for f in self.eval_frac_points})
+            ),
         )
         assert self.d_model % self.n_heads == 0
         object.__setattr__(self, "d_head", self.d_model // self.n_heads)
@@ -1053,6 +1067,19 @@ def train_loop(config: Config):
                     })
                     target_reached_step = step
                     break
+            elif step > 0 and step in config.intermediate_eval_steps:
+                # Intermediate evaluation point: log-only, does not feed the
+                # early-stop check, so the training path is unchanged.
+                run_evaluation(
+                    step,
+                    config,
+                    params,
+                    iter(val_batches),
+                    precomputed_params,
+                    mesh,
+                    logger,
+                    compiled_eval_fn,
+                )
             if config.save_every > 0 and step > 0 and (step % config.save_every == 0):
                 logger.dump(step, params, opt_state, config)
         logger.flush()
