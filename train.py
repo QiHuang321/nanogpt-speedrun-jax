@@ -217,6 +217,10 @@ class Config:
     f_warmdown_iters: float = 0.4
     n_warmdown_iters: int = 0
     val_loss_every: int = 125
+    # extra intermediate evaluation points, expressed as fractions of
+    # n_train_iters; evaluation only (no training-path change), adds val-loss
+    # measurements on top of the periodic val_loss_every cadence
+    intermediate_eval_fracs: tuple[float, ...] = (0.25, 0.5, 0.75)
     val_tokens: int = 10485760
     save_every: int = 0
 
@@ -995,6 +999,13 @@ def train_loop(config: Config):
         val_batches = load_dataset(val_config, logger, mesh, is_training=False)
         logger.msg(f"Loaded {len(val_batches)} validation batches for this process.")
 
+        # Intermediate evaluation points: extra val-loss measurements at fixed
+        # fractions of the run, in addition to the val_loss_every cadence.
+        intermediate_eval_steps = {
+            min(max(int(f * config.n_train_iters), 1), config.n_train_iters - 1)
+            for f in config.intermediate_eval_fracs
+        }
+
         logger.msg("Starting training...")
         last_step_time = time.time()
         for step in range(config.n_train_iters):
@@ -1027,7 +1038,9 @@ def train_loop(config: Config):
             }
             logger.log(log_payload)
             target_reached_step = None
-            if step > 0 and (step % config.val_loss_every == 0):
+            if step > 0 and (
+                step % config.val_loss_every == 0 or step in intermediate_eval_steps
+            ):
                 val_loss = run_evaluation(
                     step,
                     config,
