@@ -217,6 +217,11 @@ class Config:
     f_warmdown_iters: float = 0.4
     n_warmdown_iters: int = 0
     val_loss_every: int = 125
+    # intermediate evaluation points, as fractions of n_train_iters; these run
+    # in addition to the periodic val_loss_every schedule. Eval-only: the
+    # training path (data order, optimizer state, step count) is unchanged.
+    eval_frac_points: tuple[float, ...] = (0.25, 0.5, 0.75)
+    eval_step_points: tuple[int, ...] = ()
     val_tokens: int = 10485760
     save_every: int = 0
 
@@ -286,6 +291,9 @@ class Config:
         object.__setattr__(
             self, "n_warmdown_iters", int(self.n_train_iters * self.f_warmdown_iters)
         )
+        eval_steps = sorted({int(self.n_train_iters * f) for f in self.eval_frac_points})
+        eval_steps = [s for s in eval_steps if 0 < s < self.n_train_iters]
+        object.__setattr__(self, "eval_step_points", tuple(eval_steps))
         assert self.d_model % self.n_heads == 0
         object.__setattr__(self, "d_head", self.d_model // self.n_heads)
         assert self.n_layers % 2 == 0
@@ -1025,7 +1033,9 @@ def train_loop(config: Config):
             }
             logger.log(log_payload)
             target_reached_step = None
-            if step > 0 and (step % config.val_loss_every == 0):
+            is_periodic_eval = step > 0 and (step % config.val_loss_every == 0)
+            is_intermediate_eval = step in config.eval_step_points
+            if is_periodic_eval or is_intermediate_eval:
                 val_loss = run_evaluation(
                     step,
                     config,
