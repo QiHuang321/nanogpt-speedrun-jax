@@ -217,6 +217,11 @@ class Config:
     f_warmdown_iters: float = 0.4
     n_warmdown_iters: int = 0
     val_loss_every: int = 125
+    # Extra evaluation points at these fractions of training, in addition to
+    # the val_loss_every cadence. Evaluation only reads params, so the
+    # training path (data order, parameter updates) is unchanged.
+    eval_fractions: tuple[float, ...] = (0.25, 0.5, 0.75)
+    intermediate_eval_steps: tuple[int, ...] = ()
     val_tokens: int = 10485760
     save_every: int = 0
 
@@ -285,6 +290,18 @@ class Config:
 
         object.__setattr__(
             self, "n_warmdown_iters", int(self.n_train_iters * self.f_warmdown_iters)
+        )
+        object.__setattr__(
+            self,
+            "intermediate_eval_steps",
+            tuple(
+                sorted(
+                    {
+                        min(max(int(self.n_train_iters * f), 1), self.n_train_iters - 1)
+                        for f in self.eval_fractions
+                    }
+                )
+            ),
         )
         assert self.d_model % self.n_heads == 0
         object.__setattr__(self, "d_head", self.d_model // self.n_heads)
@@ -1025,7 +1042,10 @@ def train_loop(config: Config):
             }
             logger.log(log_payload)
             target_reached_step = None
-            if step > 0 and (step % config.val_loss_every == 0):
+            if step > 0 and (
+                step % config.val_loss_every == 0
+                or step in config.intermediate_eval_steps
+            ):
                 val_loss = run_evaluation(
                     step,
                     config,
