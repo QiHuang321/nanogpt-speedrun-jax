@@ -857,6 +857,10 @@ def attention_forward(params, x, v1, cos, sin, config):
     if v1 is None:
         v1 = v
     v = (1 - params["lamb"]) * v + params["lamb"] * v1.reshape(v.shape)
+    # QK-norm: RMSNorm over the head dimension (last axis) of queries and keys
+    # before applying rotary embeddings.
+    q = rms_norm(q, config)
+    k = rms_norm(k, config)
     q = apply_rotary_emb(q, cos, sin)
     k = apply_rotary_emb(k, cos, sin)
     y = dot_product_attention(q, k, v, scale=params["scale"], is_causal=True).reshape(
