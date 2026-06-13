@@ -736,11 +736,10 @@ def init_params(config: Config, mesh: Mesh) -> PyTree:
     params["wte"] = sharded_normal(next(key), (config.vocab_size, config.d_model), 1.0)
     params["h"] = []
     params["skip_weights"] = sharded_ones(config.n_layers // 2)
-    # lm_head is untied from wte: a separate output projection of shape
-    # (d_model, vocab_size), zero-initialized (modded-nanogpt convention) so the
-    # logits start at the softcap midpoint. It is trained by the adam_lm_head
-    # optimizer (see create_optimizer_map / init_optimizer).
-    params["lm_head"] = sharded_zeros((config.d_model, config.vocab_size))
+    # lm_head is tied to wte: the output projection reuses the token-embedding
+    # matrix (transposed) in gpt_forward instead of a separate parameter, so
+    # there is no params["lm_head"]. The tied weight is updated as the embedding
+    # (adam_embed); the adam_lm_head optimizer simply has no parameters to train.
 
     for i in range(config.n_layers):
         block_params = dict()
@@ -912,7 +911,9 @@ def gpt_forward(params, idx, precomputed_params, config):
             params["h"][n_encoder_layers + i], x, v1, x0, cos, sin, config
         )
     x = rms_norm(x, config)
-    logits = linear(x, params["lm_head"])
+    # Tied lm_head: reuse the (transposed) token embedding as the output
+    # projection so the input and output token weights are shared.
+    logits = linear(x, params["wte"].T)
     logits = (2.0 * config.logit_softcap) * jax.nn.sigmoid(
         logits / (config.logit_softcap / 2.0)
     )
