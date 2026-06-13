@@ -421,8 +421,9 @@ def muon(
         ns_idx = jnp.clip(
             (ns_frac * len(ns_counts)).astype(jnp.int32), 0, len(ns_counts) - 1
         )
-        frac = jnp.minimum(step / momentum_warmup_steps, 1.0)
-        momentum = warmup_momentum_init + frac * (
+        # exponential approach: momentum_warmup_steps acts as the time constant
+        decay = jnp.exp(-step / momentum_warmup_steps)
+        momentum = warmup_momentum_final - decay * (
             warmup_momentum_final - warmup_momentum_init
         )
         new_m = tree_map(
