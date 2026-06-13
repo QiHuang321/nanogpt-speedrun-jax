@@ -240,6 +240,13 @@ class Config:
     n_warmdown_iters: int = 0
     val_loss_every: int = 125
     val_tokens: int = 10485760
+    # Extra (intermediate) evaluation points, expressed as fractions of
+    # n_train_iters. Evaluation is read-only, so these only add finer-grained
+    # val_loss logging and never change the training trajectory. They do NOT
+    # trigger early stopping — that stays tied to val_loss_every — so control
+    # flow is identical to a run without them. Steps that already coincide with
+    # the val_loss_every cadence are skipped (no double evaluation).
+    intermediate_eval_fracs: tuple[float, ...] = (0.05, 0.1, 0.2, 0.3, 0.5, 0.7, 0.9)
     save_every: int = 0
 
     # Speedrun track configuration:
@@ -1059,6 +1066,15 @@ def train_loop(config: Config):
         logger.msg(f"Loaded {len(val_batches)} validation batches for this process.")
 
         logger.msg("Starting training...")
+        # Resolve intermediate evaluation points (read-only; see Config). These
+        # are extra val_loss logging steps and never alter the training path.
+        # Drop the endpoints (step 0 and the final step are handled elsewhere).
+        intermediate_eval_steps = {
+            int(f * config.n_train_iters) for f in config.intermediate_eval_fracs
+        }
+        intermediate_eval_steps = {
+            s for s in intermediate_eval_steps if 0 < s < config.n_train_iters
+        }
         last_step_time = time.time()
         for step in range(config.n_train_iters):
             batched_x, batched_y = next(train_loader)
@@ -1093,7 +1109,8 @@ def train_loop(config: Config):
             }
             logger.log(log_payload)
             target_reached_step = None
-            if step > 0 and (step % config.val_loss_every == 0):
+            is_regular_val = step > 0 and (step % config.val_loss_every == 0)
+            if is_regular_val:
                 val_loss = run_evaluation(
                     step,
                     config,
@@ -1121,6 +1138,20 @@ def train_loop(config: Config):
                     })
                     target_reached_step = step
                     break
+            elif step in intermediate_eval_steps:
+                # Intermediate evaluation point: read-only val_loss logging at
+                # finer granularity than val_loss_every. Does not trigger early
+                # stopping, so the training path is unchanged.
+                run_evaluation(
+                    step,
+                    config,
+                    params,
+                    iter(val_batches),
+                    precomputed_params,
+                    mesh,
+                    logger,
+                    compiled_eval_fn,
+                )
             if config.save_every > 0 and step > 0 and (step % config.save_every == 0):
                 logger.dump(step, params, opt_state, config)
         logger.flush()
