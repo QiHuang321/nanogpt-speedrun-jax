@@ -877,7 +877,7 @@ def attention_forward(params, x, v1, cos, sin, config):
 
 def mlp_forward(params, x):
     x = linear(x, params["c_fc"])
-    x = jnp.square(relu(x))
+    x = gelu(x)
     x = linear(x, params["c_proj"])
     return x
 
