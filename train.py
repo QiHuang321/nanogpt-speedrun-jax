@@ -240,6 +240,12 @@ class Config:
     val_loss_every: int = 125
     val_tokens: int = 10485760
     save_every: int = 0
+    # Extra, observation-only validation points. Each step index listed here
+    # triggers an additional val-loss evaluation on top of the periodic
+    # val_loss_every schedule. These points are purely diagnostic: they never
+    # participate in early stopping, so adding points does not change the
+    # training path (same params/opt_state trajectory, same data consumption).
+    intermediate_eval_steps: tuple[int, ...] = ()
 
     # Speedrun track configuration:
     #   - main track (default): run for n_train_iters steps, report final val_loss.
@@ -1058,7 +1064,9 @@ def train_loop(config: Config):
             }
             logger.log(log_payload)
             target_reached_step = None
-            if step > 0 and (step % config.val_loss_every == 0):
+            is_periodic_eval = step > 0 and (step % config.val_loss_every == 0)
+            is_intermediate_eval = step in config.intermediate_eval_steps
+            if is_periodic_eval or is_intermediate_eval:
                 val_loss = run_evaluation(
                     step,
                     config,
@@ -1069,8 +1077,12 @@ def train_loop(config: Config):
                     logger,
                     compiled_eval_fn,
                 )
+                # Early stopping acts only on the periodic schedule; the
+                # intermediate points are observation-only, so adding them
+                # cannot alter when training stops.
                 if (
-                    config.early_stop_on_target
+                    is_periodic_eval
+                    and config.early_stop_on_target
                     and val_loss is not None
                     and val_loss <= config.target_val_loss
                 ):
