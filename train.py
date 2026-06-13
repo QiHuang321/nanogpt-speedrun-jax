@@ -19,7 +19,7 @@ if _shared_cache:
 
 import jax.numpy as jnp
 from jax import jit, value_and_grad
-from jax.lax import fori_loop, rsqrt, cond, scan
+from jax.lax import fori_loop, rsqrt, cond, scan, switch
 from jax.random import PRNGKey, split, normal
 from jax.tree_util import (
     tree_map,
@@ -258,6 +258,8 @@ class Config:
     muon_warmup_momentum_init: float = 0.85
     muon_warmup_momentum_final: float = 0.95
     muon_ns_iters: int = 5
+    muon_ns_iters_min: int = 3
+    muon_ns_ramp_frac: float = 0.5
     muon_eps: float = 1e-7
 
     # adam for non-matrices
@@ -397,8 +399,15 @@ def muon(
     n_warmdown_iters: int,
     n_train_iters: int,
     ns_iters: int,
+    ns_iters_min: int,
+    ns_ramp_frac: float,
     eps: float,
 ):
+    # Newton-Schulz count ramps linearly from ns_iters_min to ns_iters over the
+    # first ns_ramp_frac of training: crude orthogonalization suffices while
+    # gradients are still noisy, saving NS matmuls early on.
+    ns_counts = list(range(min(ns_iters_min, ns_iters), ns_iters + 1))
+    ns_ramp_steps = max(int(ns_ramp_frac * n_train_iters), 1)
 
     def init(params):
         m = tree_map(jnp.zeros_like, params)
@@ -408,6 +417,10 @@ def muon(
     def update(grads, params, state):
         step = state["step"]
         lr = base_lr * get_lr(step, n_warmup_iters, n_warmdown_iters, n_train_iters)
+        ns_frac = jnp.minimum(step / ns_ramp_steps, 1.0)
+        ns_idx = jnp.clip(
+            (ns_frac * len(ns_counts)).astype(jnp.int32), 0, len(ns_counts) - 1
+        )
         frac = jnp.minimum(step / momentum_warmup_steps, 1.0)
         momentum = warmup_momentum_init + frac * (
             warmup_momentum_final - warmup_momentum_init
@@ -420,9 +433,18 @@ def muon(
 
         def _update_leaf(g, p, m):
             g_nesterov = g + momentum.astype(m.dtype) * (m - g)
+            # switch over statically-unrolled NS loops; ns_idx is traced
+            g_ortho = switch(
+                ns_idx,
+                [
+                    lambda x, n=n: zeropower_via_newtonschulz5(x, n, eps)
+                    for n in ns_counts
+                ],
+                g_nesterov,
+            )
             update = (
                 lr.astype(p.dtype)
-                * zeropower_via_newtonschulz5(g_nesterov, ns_iters, eps).astype(p.dtype)
+                * g_ortho.astype(p.dtype)
                 * jnp.sqrt(jnp.maximum(1.0, g.shape[0] / g.shape[1])).astype(p.dtype)
             )
             return p - update
@@ -764,6 +786,8 @@ def init_optimizer(config: Config, params: PyTree, mesh: Mesh):
         config.n_warmdown_iters,
         config.n_train_iters,
         config.muon_ns_iters,
+        config.muon_ns_iters_min,
+        config.muon_ns_ramp_frac,
         config.muon_eps,
     )
 
