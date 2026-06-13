@@ -219,6 +219,12 @@ class Config:
     val_loss_every: int = 125
     val_tokens: int = 10485760
     save_every: int = 0
+    # Intermediate evaluation points, given as fractions of the full run.
+    # These trigger extra validation passes purely for observability, so the
+    # val-loss curve has finer resolution than the val_loss_every grid. They
+    # never touch params, opt_state, the data cursor, the RNG, or the
+    # early-stop logic, so the training path is identical with or without them.
+    intermediate_eval_fracs: tuple[float, ...] = (0.25, 0.5, 0.75)
 
     # Speedrun track configuration:
     #   - main track (default): run for n_train_iters steps, report final val_loss.
@@ -1001,6 +1007,15 @@ def train_loop(config: Config):
         logger.msg(f"Loaded {len(val_batches)} validation batches for this process.")
 
         logger.msg("Starting training...")
+        # Observation-only evaluation points sprinkled between the regular
+        # val_loss_every checkpoints (steps already on that grid are handled by
+        # the normal validation block below). Running these does not advance the
+        # data loader, the RNG, params, or opt_state, so the training trajectory
+        # is identical whether or not they fire.
+        intermediate_eval_steps = {
+            int(frac * config.n_train_iters)
+            for frac in config.intermediate_eval_fracs
+        }
         last_step_time = time.time()
         for step in range(config.n_train_iters):
             batched_x, batched_y = next(train_loader)
@@ -1060,6 +1075,20 @@ def train_loop(config: Config):
                     })
                     target_reached_step = step
                     break
+            elif step > 0 and step in intermediate_eval_steps:
+                # Intermediate (observation-only) evaluation: log the val loss
+                # for extra curve resolution but never early-stop, so this
+                # cannot alter the training path or the reported stop step.
+                run_evaluation(
+                    step,
+                    config,
+                    params,
+                    iter(val_batches),
+                    precomputed_params,
+                    mesh,
+                    logger,
+                    compiled_eval_fn,
+                )
             if config.save_every > 0 and step > 0 and (step % config.save_every == 0):
                 logger.dump(step, params, opt_state, config)
         logger.flush()
