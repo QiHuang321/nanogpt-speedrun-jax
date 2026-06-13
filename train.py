@@ -3,6 +3,7 @@ import sys
 import glob
 import time
 import uuid
+import json
 import dataclasses
 import datetime
 
@@ -919,8 +920,15 @@ def train_step(
     final_grads = tree_map(
         lambda g: (g / n_grad_acc_steps).astype(g.dtype), final_grads_accum
     )
+    # Diagnostic-only read-out: global L2 norm of the (micro-batch-averaged)
+    # gradient that is about to be handed to the optimizer. Computed in float32
+    # from the exact same `final_grads` used for the update, so it is a pure
+    # observation and cannot alter params, opt_state, or the training path.
+    grad_norm = jnp.sqrt(
+        sum(jnp.sum(jnp.square(g.astype(jnp.float32))) for g in tree_leaves(final_grads))
+    )
     new_params, new_opt_state = optimizer.update(final_grads, params, opt_state)
-    return new_params, new_opt_state, {"loss": avg_loss}
+    return new_params, new_opt_state, {"loss": avg_loss, "grad_norm": grad_norm}
 
 
 def eval_step(
@@ -1016,6 +1024,15 @@ def train_loop(config: Config):
             int(frac * config.n_train_iters)
             for frac in config.intermediate_eval_fracs
         }
+        # Gradient-norm diagnostic hook. The per-step global grad norm is read
+        # out of train_step's metrics and appended to a JSON file kept separate
+        # from the main logs (and from logs/ and records/). This is purely
+        # observational: nothing here feeds back into params, opt_state, the
+        # data cursor, or the RNG, so the training trajectory is unchanged.
+        grad_norm_records = []
+        grad_norm_path = (
+            f"grad_norms_{logger.run_id}.json" if logger.is_master else None
+        )
         last_step_time = time.time()
         for step in range(config.n_train_iters):
             batched_x, batched_y = next(train_loader)
@@ -1033,6 +1050,13 @@ def train_loop(config: Config):
             # Read loss from local addressable shard (replicated scalar; no
             # cross-host gather). Forces a host sync, which also paces the loop.
             loss_val = float(np.asarray(metrics["loss"].addressable_data(0)))
+            if grad_norm_path is not None:
+                grad_norm_val = float(
+                    np.asarray(metrics["grad_norm"].addressable_data(0))
+                )
+                grad_norm_records.append({"step": step, "grad_norm": grad_norm_val})
+                with open(grad_norm_path, "w") as f:
+                    json.dump(grad_norm_records, f)
             now = time.time()
             step_secs = now - last_step_time
             last_step_time = now
