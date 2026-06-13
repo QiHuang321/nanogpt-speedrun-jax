@@ -242,6 +242,15 @@ class Config:
     val_tokens: int = 10485760
     save_every: int = 0
 
+    # Intermediate evaluation points: extra steps (between the regular
+    # val_loss_every cadence) at which to run validation. Validation is
+    # read-only — it never touches params / opt_state / RNG / data consumption —
+    # so adding these points does not change the training path; they only add
+    # finer-grained val_loss diagnostics. An empty tuple means "auto":
+    # __post_init__ fills in the midpoints between consecutive regular eval
+    # points. Pass an explicit tuple of step indices to override.
+    eval_at_steps: tuple[int, ...] = ()
+
     # Speedrun track configuration:
     #   - main track (default): run for n_train_iters steps, report final val_loss.
     #   - optimization track: stop as soon as val_loss <= target_val_loss is hit
@@ -314,6 +323,19 @@ class Config:
         assert self.d_model % self.n_heads == 0
         object.__setattr__(self, "d_head", self.d_model // self.n_heads)
         assert self.n_layers % 2 == 0
+
+        # Auto-populate intermediate evaluation points at the midpoints between
+        # consecutive regular (val_loss_every) eval points, unless the caller
+        # supplied an explicit tuple. Read-only diagnostics only — these do not
+        # alter the training path.
+        if not self.eval_at_steps:
+            half = self.val_loss_every // 2
+            intermediate = tuple(
+                s
+                for s in range(half, self.n_train_iters, self.val_loss_every)
+                if 0 < s < self.n_train_iters
+            )
+            object.__setattr__(self, "eval_at_steps", intermediate)
 
 
 def get_mesh(config: Config):
@@ -1090,7 +1112,9 @@ def train_loop(config: Config):
             }
             logger.log(log_payload)
             target_reached_step = None
-            if step > 0 and (step % config.val_loss_every == 0):
+            is_periodic_eval = step > 0 and (step % config.val_loss_every == 0)
+            is_intermediate_eval = step in config.eval_at_steps
+            if is_periodic_eval or is_intermediate_eval:
                 val_loss = run_evaluation(
                     step,
                     config,
