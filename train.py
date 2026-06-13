@@ -306,9 +306,8 @@ class Config:
         object.__setattr__(self, "mesh_shape", (jax.device_count(),))
         assert self.batch_size % self.micro_batch_size == 0
 
-        object.__setattr__(
-            self, "n_warmup_iters", int(self.n_train_iters * self.f_warmup_iters)
-        )
+        # Fixed LR warmup over the first 100 steps (linear ramp in get_lr).
+        object.__setattr__(self, "n_warmup_iters", 100)
         object.__setattr__(
             self, "n_warmdown_iters", int(self.n_train_iters * self.f_warmdown_iters)
         )
