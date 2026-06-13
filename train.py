@@ -36,6 +36,7 @@ from jax.nn import dot_product_attention
 import einops
 
 import pickle
+import json
 
 import numpy as np
 
@@ -933,8 +934,18 @@ def train_step(
     final_grads = tree_map(
         lambda g: (g / n_grad_acc_steps).astype(g.dtype), final_grads_accum
     )
+    # Diagnostic-only: global L2 norm of the gradients actually handed to the
+    # optimizer. Computed from `final_grads` (in float32 for accuracy) without
+    # modifying them, so the optimizer update below is byte-for-byte identical
+    # whether or not this is computed.
+    grad_norm = jnp.sqrt(
+        sum(
+            jnp.sum(jnp.square(g.astype(jnp.float32)))
+            for g in tree_leaves(final_grads)
+        )
+    )
     new_params, new_opt_state = optimizer.update(final_grads, params, opt_state)
-    return new_params, new_opt_state, {"loss": avg_loss}
+    return new_params, new_opt_state, {"loss": avg_loss, "grad_norm": grad_norm}
 
 
 def eval_step(
@@ -1030,6 +1041,19 @@ def train_loop(config: Config):
             int(frac * config.n_train_iters)
             for frac in config.intermediate_eval_fracs
         }
+        # Gradient-norm diagnostic: the master process appends the global
+        # gradient L2 norm per step to a standalone JSON file, kept separate
+        # from the training logs (logs/) and records/. This is observation-only
+        # — the value is read straight off the train_step output and never fed
+        # back into params, opt_state, the RNG, or the early-stop logic, so the
+        # training trajectory is identical with or without it. Override the
+        # destination with the GRAD_NORM_JSON env var.
+        grad_norm_json_path = None
+        grad_norm_history = []
+        if logger.is_master:
+            grad_norm_json_path = os.environ.get(
+                "GRAD_NORM_JSON", f"grad_norms_{logger.run_id}.json"
+            )
         last_step_time = time.time()
         for step in range(config.n_train_iters):
             batched_x, batched_y = next(train_loader)
@@ -1060,6 +1084,15 @@ def train_loop(config: Config):
                 "batch_size": batch_size,
             }
             logger.log(log_payload)
+            if grad_norm_json_path is not None:
+                # Replicated scalar; read the local addressable shard (the loss
+                # read above already forced a host sync this step).
+                grad_norm_val = float(
+                    np.asarray(metrics["grad_norm"].addressable_data(0))
+                )
+                grad_norm_history.append({"step": step, "grad_norm": grad_norm_val})
+                with open(grad_norm_json_path, "w") as f:
+                    json.dump(grad_norm_history, f)
             target_reached_step = None
             if step > 0 and (step % config.val_loss_every == 0):
                 val_loss = run_evaluation(
