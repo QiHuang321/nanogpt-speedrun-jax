@@ -220,6 +220,14 @@ class Config:
     val_tokens: int = 10485760
     save_every: int = 0
 
+    # Extra intermediate evaluation points: explicit step indices at which to
+    # run an additional validation pass, on top of the regular val_loss_every
+    # schedule. Purely observational (val_loss is logged only) — these points
+    # never early-stop, so for any given config the set of steps actually
+    # trained is identical whether or not eval_steps is set (no training-path
+    # change). Empty by default, so default behaviour is unchanged.
+    eval_steps: tuple[int, ...] = ()
+
     # Speedrun track configuration:
     #   - main track (default): run for n_train_iters steps, report final val_loss.
     #   - optimization track: stop as soon as val_loss <= target_val_loss is hit
@@ -1053,6 +1061,22 @@ def train_loop(config: Config):
                     })
                     target_reached_step = step
                     break
+            elif step in config.eval_steps:
+                # Intermediate evaluation point: an extra validation pass at an
+                # explicitly requested step that isn't already on the periodic
+                # val_loss_every schedule. Observation-only — we log val_loss
+                # but never early-stop here, so the training path is identical
+                # to a run without eval_steps set.
+                run_evaluation(
+                    step,
+                    config,
+                    params,
+                    iter(val_batches),
+                    precomputed_params,
+                    mesh,
+                    logger,
+                    compiled_eval_fn,
+                )
             if config.save_every > 0 and step > 0 and (step % config.save_every == 0):
                 logger.dump(step, params, opt_state, config)
         logger.flush()
@@ -1104,4 +1128,11 @@ if __name__ == "__main__":
         )
     else:
         print(f"[track] MAIN (wall-clock) track", flush=True)
+    # Optional extra intermediate evaluation points, e.g. EVAL_STEPS="100,500,1000".
+    # Comma- or space-separated step indices; observation-only, no training-path change.
+    eval_steps_env = os.environ.get("EVAL_STEPS", "").strip()
+    if eval_steps_env:
+        eval_steps = tuple(int(s) for s in eval_steps_env.replace(",", " ").split())
+        config = dataclasses.replace(config, eval_steps=eval_steps)
+        print(f"[eval] intermediate evaluation points at steps {eval_steps}", flush=True)
     train_loop(config)
