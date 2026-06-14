@@ -219,6 +219,11 @@ class Config:
     val_loss_every: int = 125
     val_tokens: int = 10485760
     save_every: int = 0
+    # Intermediate evaluation points: extra steps at which to run a read-only
+    # validation pass, in addition to the regular val_loss_every cadence.
+    # Purely observational (never triggers early stop). Empty by default so the
+    # wall-clock main track is unaffected; populate for finer loss-curve probes.
+    eval_at_steps: tuple[int, ...] = ()
 
     # Speedrun track configuration:
     #   - main track (default): run for n_train_iters steps, report final val_loss.
@@ -1024,7 +1029,16 @@ def train_loop(config: Config):
             }
             logger.log(log_payload)
             target_reached_step = None
-            if step > 0 and (step % config.val_loss_every == 0):
+            is_periodic_eval = step > 0 and (step % config.val_loss_every == 0)
+            # Intermediate evaluation points: extra read-only validations at
+            # specific milestone steps, on top of the val_loss_every cadence.
+            # Skipped when this step already has a periodic eval (no double
+            # eval). These never trigger early stop, so the training path is
+            # identical whether or not eval_at_steps is set.
+            is_intermediate_eval = (
+                step in config.eval_at_steps and not is_periodic_eval
+            )
+            if is_periodic_eval or is_intermediate_eval:
                 val_loss = run_evaluation(
                     step,
                     config,
@@ -1036,7 +1050,8 @@ def train_loop(config: Config):
                     compiled_eval_fn,
                 )
                 if (
-                    config.early_stop_on_target
+                    is_periodic_eval
+                    and config.early_stop_on_target
                     and val_loss is not None
                     and val_loss <= config.target_val_loss
                 ):
