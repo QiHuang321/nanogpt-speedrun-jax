@@ -247,6 +247,15 @@ class Config:
     val_loss_every: int = 125
     val_tokens: int = 10485760
     save_every: int = 0
+    # Additional, explicit step indices at which to run an extra validation
+    # pass, on top of the regular val_loss_every cadence. These are purely
+    # observational intermediate evaluation points: validation never reads or
+    # mutates params / optimizer state, and they are deliberately excluded from
+    # the early-stop check, so the training trajectory (and when it stops) is
+    # identical to a run without them. Empty by default so the wall-clock
+    # speedrun is unaffected; populate (e.g. eval_points=(10, 25, 50)) to
+    # densely sample the val-loss curve between the regular cadence points.
+    eval_points: tuple[int, ...] = ()
 
     # Speedrun track configuration:
     #   - main track (default): run for n_train_iters steps, report final val_loss.
@@ -1089,6 +1098,22 @@ def train_loop(config: Config):
                     })
                     target_reached_step = step
                     break
+            elif step > 0 and step in config.eval_points:
+                # Intermediate evaluation point: an extra, observation-only
+                # validation pass to densify the val-loss curve at steps that
+                # fall between the regular val_loss_every cadence. It logs
+                # val_loss but is intentionally excluded from the early-stop
+                # check, so the training path is identical to a run without it.
+                run_evaluation(
+                    step,
+                    config,
+                    params,
+                    iter(val_batches),
+                    precomputed_params,
+                    mesh,
+                    logger,
+                    compiled_eval_fn,
+                )
             if config.save_every > 0 and step > 0 and (step % config.save_every == 0):
                 logger.dump(step, params, opt_state, config)
         logger.flush()
