@@ -233,6 +233,15 @@ class Config:
     val_loss_every: int = 125
     val_tokens: int = 10485760
     save_every: int = 0
+    # Intermediate (diagnostic) evaluation points: explicit step indices at
+    # which to ALSO run validation, on top of the regular val_loss_every
+    # cadence. Evaluation only reads params (it never mutates params/opt_state
+    # and never touches the training token stream or RNG), and these extra
+    # evals are diagnostic-only — they never trigger early-stop — so the number
+    # of training steps executed is identical whether or not this is set. Steps
+    # already covered by the val_loss_every cadence are not evaluated twice.
+    # Default empty: behavior is unchanged unless explicitly populated.
+    eval_intermediate_steps: tuple[int, ...] = ()
 
     # Speedrun track configuration:
     #   - main track (default): run for n_train_iters steps, report final val_loss.
@@ -1049,7 +1058,18 @@ def train_loop(config: Config):
             }
             logger.log(log_payload)
             target_reached_step = None
-            if step > 0 and (step % config.val_loss_every == 0):
+            cadence_eval = step > 0 and (step % config.val_loss_every == 0)
+            # Intermediate (diagnostic) eval points: run validation at extra
+            # step indices for finer-grained monitoring. Evaluation is
+            # read-only w.r.t. params/opt_state and the training stream, so this
+            # does not change the training path. Skip steps the regular cadence
+            # already covers so we never evaluate the same step twice.
+            intermediate_eval = (
+                step > 0
+                and not cadence_eval
+                and step in config.eval_intermediate_steps
+            )
+            if cadence_eval or intermediate_eval:
                 val_loss = run_evaluation(
                     step,
                     config,
@@ -1060,8 +1080,11 @@ def train_loop(config: Config):
                     logger,
                     compiled_eval_fn,
                 )
+                # Early-stop is gated on the regular cadence only: intermediate
+                # evals must never alter how many training steps execute.
                 if (
-                    config.early_stop_on_target
+                    cadence_eval
+                    and config.early_stop_on_target
                     and val_loss is not None
                     and val_loss <= config.target_val_loss
                 ):
@@ -1128,4 +1151,14 @@ if __name__ == "__main__":
         )
     else:
         print(f"[track] MAIN (wall-clock) track", flush=True)
+    # Optional intermediate evaluation points (comma-separated step indices),
+    # e.g. EVAL_STEPS="50,100,250". Diagnostic-only: extra validation runs that
+    # do not change the training path. Unset/empty leaves the default (none).
+    eval_steps_env = os.environ.get("EVAL_STEPS", "").strip()
+    if eval_steps_env:
+        extra_eval_steps = tuple(
+            int(s) for s in eval_steps_env.split(",") if s.strip()
+        )
+        config = dataclasses.replace(config, eval_intermediate_steps=extra_eval_steps)
+        print(f"[eval] intermediate evaluation points: {extra_eval_steps}", flush=True)
     train_loop(config)
