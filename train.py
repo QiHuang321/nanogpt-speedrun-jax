@@ -5,6 +5,7 @@ import time
 import uuid
 import dataclasses
 import datetime
+import json
 
 import jax
 # NOTE: do NOT call jax.distributed.initialize() — Cloud TPU auto-initializes
@@ -170,6 +171,33 @@ class Logger:
             pickle.dump(state_to_save, f)
 
         self.msg(f"Saved checkpoint to {save_path}")
+
+
+class GradNormDiagnostic:
+    """Per-step global gradient-norm diagnostic hook.
+
+    Purely observational: records the global L2 norm of the accumulated
+    gradient each step to a standalone JSON file under ``diagnostics/``,
+    kept entirely separate from the training logs and checkpoints. It never
+    reads or mutates params, grads, or optimizer state, so it has no effect
+    on the training trajectory.
+    """
+
+    def __init__(self, run_id):
+        self.is_master = jax.process_index() == 0
+        self.records = []
+        self.path = None
+        if not self.is_master:
+            return
+        os.makedirs("diagnostics", exist_ok=True)
+        self.path = f"diagnostics/grad_norm_{run_id}.json"
+
+    def record(self, step: int, grad_norm: float):
+        if not self.is_master or self.path is None:
+            return
+        self.records.append({"step": int(step), "grad_norm": float(grad_norm)})
+        with open(self.path, "w") as f:
+            json.dump(self.records, f)
 
 
 def filter_pytree(pytree: PyTree, condition_map: Any) -> PyTree | None:
@@ -906,8 +934,14 @@ def train_step(
     final_grads = tree_map(
         lambda g: (g / n_grad_acc_steps).astype(g.dtype), final_grads_accum
     )
+    # Diagnostic only: global L2 norm of the gradient that the optimizer is
+    # about to consume. Computed in float32 for a meaningful value; does not
+    # influence the update below.
+    grad_norm = jnp.sqrt(
+        sum(jnp.sum(jnp.square(g.astype(jnp.float32))) for g in tree_leaves(final_grads))
+    )
     new_params, new_opt_state = optimizer.update(final_grads, params, opt_state)
-    return new_params, new_opt_state, {"loss": avg_loss}
+    return new_params, new_opt_state, {"loss": avg_loss, "grad_norm": grad_norm}
 
 
 def eval_step(
@@ -964,6 +998,7 @@ def run_evaluation(
 
 def train_loop(config: Config):
     logger = Logger()
+    grad_diag = GradNormDiagnostic(logger.run_id)
     mesh = get_mesh(config)
 
     with mesh:
@@ -1011,6 +1046,8 @@ def train_loop(config: Config):
             # Read loss from local addressable shard (replicated scalar; no
             # cross-host gather). Forces a host sync, which also paces the loop.
             loss_val = float(np.asarray(metrics["loss"].addressable_data(0)))
+            grad_norm_val = float(np.asarray(metrics["grad_norm"].addressable_data(0)))
+            grad_diag.record(step, grad_norm_val)
             now = time.time()
             step_secs = now - last_step_time
             last_step_time = now
