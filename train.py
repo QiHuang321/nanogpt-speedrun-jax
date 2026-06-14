@@ -217,6 +217,11 @@ class Config:
     f_warmdown_iters: float = 0.2  # trapezoid decay over the final 20% of training
     n_warmdown_iters: int = 0
     val_loss_every: int = 125
+    # Extra one-off evaluation step indices for finer-grained val_loss
+    # tracking, in addition to the regular val_loss_every cadence. These are
+    # observational only: they never trigger early stopping and never modify
+    # params/opt_state, so the training path is unchanged.
+    eval_at_steps: tuple[int, ...] = ()
     val_tokens: int = 10485760
     save_every: int = 0
 
@@ -1060,6 +1065,21 @@ def train_loop(config: Config):
                     })
                     target_reached_step = step
                     break
+            elif step > 0 and step in config.eval_at_steps:
+                # Intermediate evaluation point: observational only, so it
+                # never triggers early stopping and leaves the training path
+                # unchanged. Skipped when it coincides with the regular
+                # val_loss_every cadence (handled by the branch above).
+                run_evaluation(
+                    step,
+                    config,
+                    params,
+                    iter(val_batches),
+                    precomputed_params,
+                    mesh,
+                    logger,
+                    compiled_eval_fn,
+                )
             if config.save_every > 0 and step > 0 and (step % config.save_every == 0):
                 logger.dump(step, params, opt_state, config)
         logger.flush()
