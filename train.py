@@ -3,6 +3,7 @@ import sys
 import glob
 import time
 import uuid
+import json
 import dataclasses
 import datetime
 
@@ -84,6 +85,10 @@ class Logger:
         os.makedirs(self.logdir, exist_ok=True)
         self.logfile = f"logs/{self.run_id}.txt"
         self.prev_metrics = None
+        # Gradient-norm diagnostic: written to its own JSON file (kept separate
+        # from logs/ and records/) so it doesn't interfere with the main logs.
+        self.grad_norms = []
+        self.gradnorm_file = f"gradnorm_{self.run_id}.json"
         with open(self.logfile, "w") as f:
             with open(sys.argv[0]) as f2:
                 code = f2.read()
@@ -153,6 +158,15 @@ class Logger:
         print(metrics)
         with open(self.logfile, "a") as f:
             f.write("[METRICS (latest)] " + str(metrics) + "\n")
+
+    def log_grad_norm(self, step: int, grad_norm: float):
+        # Diagnostic-only hook: record the global gradient norm to a standalone
+        # JSON file. Does not affect training or the main metric logs.
+        if not self.is_master:
+            return
+        self.grad_norms.append({"step": int(step), "grad_norm": float(grad_norm)})
+        with open(self.gradnorm_file, "w") as f:
+            json.dump(self.grad_norms, f)
 
     def dump(self, step: int, params: PyTree, opt_state: PyTree, config):
         if not self.is_master:
@@ -906,8 +920,17 @@ def train_step(
     final_grads = tree_map(
         lambda g: (g / n_grad_acc_steps).astype(g.dtype), final_grads_accum
     )
+    # Diagnostic-only: global L2 norm of the (averaged) gradient used for the
+    # update. Computed in float32; does not alter the grads passed to the
+    # optimizer, so training is unaffected.
+    grad_norm = jnp.sqrt(
+        sum(
+            jnp.sum(jnp.square(g.astype(jnp.float32)))
+            for g in tree_leaves(final_grads)
+        )
+    )
     new_params, new_opt_state = optimizer.update(final_grads, params, opt_state)
-    return new_params, new_opt_state, {"loss": avg_loss}
+    return new_params, new_opt_state, {"loss": avg_loss, "grad_norm": grad_norm}
 
 
 def eval_step(
@@ -1011,6 +1034,8 @@ def train_loop(config: Config):
             # Read loss from local addressable shard (replicated scalar; no
             # cross-host gather). Forces a host sync, which also paces the loop.
             loss_val = float(np.asarray(metrics["loss"].addressable_data(0)))
+            grad_norm_val = float(np.asarray(metrics["grad_norm"].addressable_data(0)))
+            logger.log_grad_norm(step, grad_norm_val)
             now = time.time()
             step_secs = now - last_step_time
             last_step_time = now
