@@ -36,6 +36,7 @@ from jax.nn import dot_product_attention
 import einops
 
 import pickle
+import json
 
 import numpy as np
 
@@ -84,6 +85,10 @@ class Logger:
         os.makedirs(self.logdir, exist_ok=True)
         self.logfile = f"logs/{self.run_id}.txt"
         self.prev_metrics = None
+        # Gradient-norm diagnostic: per-step global grad L2 norm written to a
+        # separate JSON file. Purely diagnostic — does not affect training.
+        self.grad_norm_file = f"{self.logdir}/grad_norms.json"
+        self.grad_norms = []
         with open(self.logfile, "w") as f:
             with open(sys.argv[0]) as f2:
                 code = f2.read()
@@ -153,6 +158,15 @@ class Logger:
         print(metrics)
         with open(self.logfile, "a") as f:
             f.write("[METRICS (latest)] " + str(metrics) + "\n")
+
+    def log_grad_norm(self, step: int, grad_norm: float):
+        # Append one record and rewrite the JSON file so it stays a valid
+        # JSON document. Separate from the main log; diagnostic only.
+        if not self.is_master:
+            return
+        self.grad_norms.append({"step": int(step), "grad_norm": float(grad_norm)})
+        with open(self.grad_norm_file, "w") as f:
+            json.dump(self.grad_norms, f)
 
     def dump(self, step: int, params: PyTree, opt_state: PyTree, config):
         if not self.is_master:
@@ -906,8 +920,13 @@ def train_step(
     final_grads = tree_map(
         lambda g: (g / n_grad_acc_steps).astype(g.dtype), final_grads_accum
     )
+    # Diagnostic only (not fed into the update): global L2 norm of the
+    # post-accumulation gradients, summed in float32 for stability.
+    grad_norm = jnp.sqrt(
+        sum(jnp.sum(jnp.square(g.astype(jnp.float32))) for g in tree_leaves(final_grads))
+    )
     new_params, new_opt_state = optimizer.update(final_grads, params, opt_state)
-    return new_params, new_opt_state, {"loss": avg_loss}
+    return new_params, new_opt_state, {"loss": avg_loss, "grad_norm": grad_norm}
 
 
 def eval_step(
@@ -1024,6 +1043,8 @@ def train_loop(config: Config):
                 "batch_size": batch_size,
             }
             logger.log(log_payload)
+            grad_norm_val = float(np.asarray(metrics["grad_norm"].addressable_data(0)))
+            logger.log_grad_norm(step, grad_norm_val)
             target_reached_step = None
             if step > 0 and (step % config.val_loss_every == 0):
                 val_loss = run_evaluation(
