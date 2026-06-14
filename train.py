@@ -239,6 +239,12 @@ class Config:
     val_loss_every: int = 125
     val_tokens: int = 10485760
     save_every: int = 0
+    # Extra step indices at which to also run validation, on top of the regular
+    # `val_loss_every` cadence. Lets you sample val_loss at chosen intermediate
+    # points; evaluation is read-only so this does not touch the training path.
+    # Empty by default (existing runs unchanged); a tuple so Config stays
+    # hashable/static for register_static.
+    eval_at_steps: tuple[int, ...] = ()
 
     # Speedrun track configuration:
     #   - main track (default): run for n_train_iters steps, report final val_loss.
@@ -1058,7 +1064,9 @@ def train_loop(config: Config):
                 step, grad_norm_val, loss=loss_val, seq_len=seq_len, batch_size=batch_size
             )
             target_reached_step = None
-            if step > 0 and (step % config.val_loss_every == 0):
+            if step > 0 and (
+                step % config.val_loss_every == 0 or step in config.eval_at_steps
+            ):
                 val_loss = run_evaluation(
                     step,
                     config,
