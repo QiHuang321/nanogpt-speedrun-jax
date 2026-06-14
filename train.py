@@ -253,7 +253,7 @@ class Config:
     adam_lm_head_beta2: float = 0.95
 
     # muon for matrices
-    muon_base_lr: float = 0.050625  # handicap: quartered from tuned 0.04 (s0 headroom), then +50% three times
+    muon_base_lr: float = 0.0759375  # handicap: quartered from tuned 0.04 (s0 headroom), then +50% four times
     muon_momentum_warmup_steps: int = 500
     muon_warmup_momentum_init: float = 0.85
     muon_warmup_momentum_final: float = 0.95
