@@ -257,7 +257,7 @@ class Config:
     muon_momentum_warmup_steps: int = 500
     muon_warmup_momentum_init: float = 0.85
     muon_warmup_momentum_final: float = 0.95
-    muon_ns_iters: int = 5
+    muon_ns_iters: int = 5  # max NS iters, reached by mid-training; fewer early
     muon_eps: float = 1e-7
 
     # adam for non-matrices
@@ -367,11 +367,14 @@ def zeropower_via_newtonschulz5(G, steps, eps):
 
     def _update_loop(X):
         a, b, c = (3.4445, -4.7750, 2.0315)
-        for i in range(steps):
+
+        def body(i, X):
             A = X @ X.T
             B = b * A + c * (A @ A)
-            X = a * X + B @ X
-        return X
+            return a * X + B @ X
+
+        # steps may be a traced (step-dependent) value, so loop dynamically.
+        return fori_loop(0, steps, body, X)
 
     def tall_case(g):
         X = g.T.astype(jnp.bfloat16)
@@ -418,11 +421,22 @@ def muon(
             grads,
         )
 
+        # Adaptive Newton-Schulz: use fewer iterations early in training (noisy
+        # gradients need less precise orthogonalization), ramping up to the full
+        # ns_iters by the midpoint of training.
+        ns_floor = max(1, ns_iters - 2)
+        ns_progress = jnp.minimum(2.0 * step / n_train_iters, 1.0)
+        adaptive_ns_iters = ns_floor + jnp.floor(
+            ns_progress * (ns_iters - ns_floor)
+        ).astype(jnp.int32)
+
         def _update_leaf(g, p, m):
             g_nesterov = g + momentum.astype(m.dtype) * (m - g)
             update = (
                 lr.astype(p.dtype)
-                * zeropower_via_newtonschulz5(g_nesterov, ns_iters, eps).astype(p.dtype)
+                * zeropower_via_newtonschulz5(g_nesterov, adaptive_ns_iters, eps).astype(
+                    p.dtype
+                )
                 * jnp.sqrt(jnp.maximum(1.0, g.shape[0] / g.shape[1])).astype(p.dtype)
             )
             return p - update
