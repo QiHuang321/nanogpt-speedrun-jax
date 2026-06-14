@@ -257,7 +257,7 @@ class Config:
     muon_momentum_warmup_steps: int = 500
     muon_warmup_momentum_init: float = 0.85
     muon_warmup_momentum_final: float = 0.95
-    muon_ns_iters: int = 5
+    muon_ns_iters: int = 2  # handicap
     muon_eps: float = 1e-7
 
     # adam for non-matrices
