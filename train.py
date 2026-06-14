@@ -5,6 +5,7 @@ import time
 import uuid
 import dataclasses
 import datetime
+import json
 
 import jax
 # NOTE: do NOT call jax.distributed.initialize() — Cloud TPU auto-initializes
@@ -84,6 +85,13 @@ class Logger:
         os.makedirs(self.logdir, exist_ok=True)
         self.logfile = f"logs/{self.run_id}.txt"
         self.prev_metrics = None
+        # Gradient-norm diagnostics are written to a separate JSON file so the
+        # main text log / wandb stream stay byte-for-byte unchanged. Master only;
+        # path is overridable via env var and defaults to the cwd (not logs/).
+        self.grad_norm_path = os.environ.get(
+            "GRAD_NORM_JSON", f"grad_norm_{self.run_id}.json"
+        )
+        self.grad_norm_records = []
         with open(self.logfile, "w") as f:
             with open(sys.argv[0]) as f2:
                 code = f2.read()
@@ -153,6 +161,18 @@ class Logger:
         print(metrics)
         with open(self.logfile, "a") as f:
             f.write("[METRICS (latest)] " + str(metrics) + "\n")
+
+    def log_grad_norm(self, step: int, grad_norm: float, **extra):
+        # Diagnostic-only hook: append one record per step and rewrite the JSON
+        # file so partial results survive an interrupted run. Has no effect on
+        # training, the optimizer state, or the main metrics log.
+        if not self.is_master:
+            return
+        record = {"step": int(step), "grad_norm": float(grad_norm)}
+        record.update(extra)
+        self.grad_norm_records.append(record)
+        with open(self.grad_norm_path, "w") as f:
+            json.dump(self.grad_norm_records, f)
 
     def dump(self, step: int, params: PyTree, opt_state: PyTree, config):
         if not self.is_master:
@@ -906,8 +926,14 @@ def train_step(
     final_grads = tree_map(
         lambda g: (g / n_grad_acc_steps).astype(g.dtype), final_grads_accum
     )
+    # Diagnostic only — global L2 norm of the accumulated gradients, computed in
+    # float32 to avoid bf16 round-off. This reads the same final_grads passed to
+    # the update below and does not alter the update in any way.
+    grad_norm = jnp.sqrt(
+        sum(jnp.sum(jnp.square(g.astype(jnp.float32))) for g in tree_leaves(final_grads))
+    )
     new_params, new_opt_state = optimizer.update(final_grads, params, opt_state)
-    return new_params, new_opt_state, {"loss": avg_loss}
+    return new_params, new_opt_state, {"loss": avg_loss, "grad_norm": grad_norm}
 
 
 def eval_step(
@@ -1024,6 +1050,13 @@ def train_loop(config: Config):
                 "batch_size": batch_size,
             }
             logger.log(log_payload)
+            # Separate gradient-norm diagnostic (written to its own JSON file);
+            # deliberately kept out of log_payload so the main log/wandb output
+            # is unchanged. Read from the local addressable shard like the loss.
+            grad_norm_val = float(np.asarray(metrics["grad_norm"].addressable_data(0)))
+            logger.log_grad_norm(
+                step, grad_norm_val, loss=loss_val, seq_len=seq_len, batch_size=batch_size
+            )
             target_reached_step = None
             if step > 0 and (step % config.val_loss_every == 0):
                 val_loss = run_evaluation(
