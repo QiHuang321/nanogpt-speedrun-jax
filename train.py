@@ -271,7 +271,7 @@ class Config:
     n_heads: int = 4
     d_head: int = 0
     logit_softcap: float = 15.0
-    rope_base: float = 1024
+    rope_base: float = 10000  # handicap
     vocab_size: int = 50304
     dtype: str = "bfloat16"
 
