@@ -5,6 +5,7 @@ import time
 import uuid
 import dataclasses
 import datetime
+import json
 
 import jax
 # NOTE: do NOT call jax.distributed.initialize() — Cloud TPU auto-initializes
@@ -906,7 +907,13 @@ def train_step(
         lambda g: (g / n_grad_acc_steps).astype(g.dtype), final_grads_accum
     )
     new_params, new_opt_state = optimizer.update(final_grads, params, opt_state)
-    return new_params, new_opt_state, {"loss": avg_loss}
+    # Gradient-norm diagnostic: global L2 norm of the (grad-accumulated) grads.
+    # Observational only — computed from final_grads and does not feed back into
+    # params or opt_state, so the training trajectory is unchanged.
+    grad_norm = jnp.sqrt(
+        sum(jnp.sum(jnp.square(g)) for g in tree_leaves(final_grads))
+    )
+    return new_params, new_opt_state, {"loss": avg_loss, "grad_norm": grad_norm}
 
 
 def eval_step(
@@ -992,6 +999,14 @@ def train_loop(config: Config):
         val_batches = load_dataset(val_config, logger, mesh, is_training=False)
         logger.msg(f"Loaded {len(val_batches)} validation batches for this process.")
 
+        # Gradient-norm diagnostic hook: record the per-step global gradient
+        # norm to a standalone JSON file, kept separate from the normal training
+        # logs. Master-only and purely observational (no effect on training).
+        grad_norm_log = []
+        grad_norm_path = None
+        if logger.is_master and logger.run_id is not None:
+            grad_norm_path = f"grad_norms_{logger.run_id}.json"
+
         logger.msg("Starting training...")
         last_step_time = time.time()
         for step in range(config.n_train_iters):
@@ -1023,6 +1038,15 @@ def train_loop(config: Config):
                 "batch_size": batch_size,
             }
             logger.log(log_payload)
+            if grad_norm_path is not None:
+                grad_norm_val = float(
+                    np.asarray(metrics["grad_norm"].addressable_data(0))
+                )
+                grad_norm_log.append({"step": step, "grad_norm": grad_norm_val})
+                with open(grad_norm_path, "w") as f:
+                    json.dump(
+                        {"run_id": logger.run_id, "grad_norms": grad_norm_log}, f
+                    )
             target_reached_step = None
             if step > 0 and (step % config.val_loss_every == 0):
                 val_loss = run_evaluation(
