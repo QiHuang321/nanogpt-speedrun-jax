@@ -213,6 +213,11 @@ class Config:
 
     # iteration handling
     n_train_iters: int = 1675
+    # Warmup-stable-decay (trapezoid) schedule fractions, resolved to absolute
+    # step counts in __post_init__. Warmup ramps LR up over the first
+    # f_warmup_iters of training; warmdown decays it back to 0 over the final
+    # f_warmdown_iters. Peak LR is unchanged (the multiplier tops out at 1.0).
+    f_warmup_iters: float = 0.05
     n_warmup_iters: int = 0
     f_warmdown_iters: float = 0.4
     n_warmdown_iters: int = 0
@@ -290,6 +295,9 @@ class Config:
         assert self.batch_size % self.micro_batch_size == 0
 
         object.__setattr__(
+            self, "n_warmup_iters", int(self.n_train_iters * self.f_warmup_iters)
+        )
+        object.__setattr__(
             self, "n_warmdown_iters", int(self.n_train_iters * self.f_warmdown_iters)
         )
         assert self.d_model % self.n_heads == 0
@@ -318,9 +326,13 @@ class Optimizer(NamedTuple):
 
 
 def get_lr(it, n_warmup_iters, n_warmdown_iters, n_train_iters):
+    # Warmup-stable-decay (trapezoid) schedule. The returned value multiplies
+    # each optimizer's base LR; it tops out at 1.0 so the peak LR is unchanged.
+    # Linear warmup 0->1, constant stable phase at 1.0, then linear decay 1->0
+    # over the final n_warmdown_iters steps (full trapezoid, decays to zero).
     warmup_lr = (it + 1) / n_warmup_iters
     constant_lr = 1.0
-    warmdown_lr = (n_train_iters - it) / n_warmdown_iters * (1.0 - 0.1) + 0.1
+    warmdown_lr = (n_train_iters - it) / n_warmdown_iters
     lr = jnp.where(
         it < n_warmup_iters,
         warmup_lr,
