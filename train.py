@@ -654,9 +654,8 @@ def precompute_rope(config: Config, mesh: Mesh) -> PyTree:
     dim = config.d_head
     seq_len = config.max_sequence_length
     inv_freq = 1.0 / (
-        config.rope_base ** (jnp.arange(0, dim // 4, dtype=jnp.float32) / (dim // 4))
+        config.rope_base ** (jnp.arange(0, dim // 2, dtype=jnp.float32) / (dim // 2))
     )
-    inv_freq = jnp.concatenate([inv_freq, jnp.zeros_like(inv_freq)])
     t = jnp.arange(seq_len)
     freqs = jnp.outer(t, inv_freq)
     cos = jnp.cos(freqs).astype(config.dtype)
