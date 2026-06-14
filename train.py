@@ -220,6 +220,12 @@ class Config:
     val_tokens: int = 10485760
     save_every: int = 0
 
+    # Intermediate evaluation points: explicit step indices at which to run an
+    # extra validation pass, in addition to the val_loss_every cadence. Purely
+    # observational (read-only on params) — does not affect the training path.
+    # Empty by default, so the default run is byte-identical.
+    eval_at_steps: tuple[int, ...] = ()
+
     # Speedrun track configuration:
     #   - main track (default): run for n_train_iters steps, report final val_loss.
     #   - optimization track: stop as soon as val_loss <= target_val_loss is hit
@@ -1025,7 +1031,9 @@ def train_loop(config: Config):
             }
             logger.log(log_payload)
             target_reached_step = None
-            if step > 0 and (step % config.val_loss_every == 0):
+            do_periodic_eval = step > 0 and (step % config.val_loss_every == 0)
+            do_intermediate_eval = step in config.eval_at_steps
+            if do_periodic_eval or do_intermediate_eval:
                 val_loss = run_evaluation(
                     step,
                     config,
@@ -1104,4 +1112,12 @@ if __name__ == "__main__":
         )
     else:
         print(f"[track] MAIN (wall-clock) track", flush=True)
+    # Optional intermediate evaluation points (comma/space-separated step
+    # indices), e.g. EVAL_AT_STEPS="50,100,250". Each triggers a read-only
+    # extra validation pass; does not change the training path. Unset => default.
+    _eval_at = os.environ.get("EVAL_AT_STEPS", "").replace(",", " ").split()
+    if _eval_at:
+        eval_at_steps = tuple(sorted({int(s) for s in _eval_at}))
+        config = dataclasses.replace(config, eval_at_steps=eval_at_steps)
+        print(f"[eval] intermediate evaluation points: {eval_at_steps}", flush=True)
     train_loop(config)
