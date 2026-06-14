@@ -224,6 +224,16 @@ class Config:
     val_tokens: int = 10485760
     save_every: int = 0
 
+    # Intermediate (diagnostic) evaluation points: additional fractions of the
+    # run at which to run validation purely for observability. These are
+    # read-only — they log val_loss at a finer granularity than val_loss_every
+    # (e.g. early in training where the curve moves fast) but never affect the
+    # training path: no early stop, no checkpointing, no change to how params,
+    # opt_state, or training data are consumed. Resolved to concrete step
+    # indices in __post_init__ (eval_at_steps), de-duplicated and sorted.
+    eval_at_fracs: tuple[float, ...] = (0.1, 0.25, 0.5, 0.75, 0.9)
+    eval_at_steps: tuple[int, ...] = ()
+
     # Speedrun track configuration:
     #   - main track (default): run for n_train_iters steps, report final val_loss.
     #   - optimization track: stop as soon as val_loss <= target_val_loss is hit
@@ -296,6 +306,17 @@ class Config:
         assert self.d_model % self.n_heads == 0
         object.__setattr__(self, "d_head", self.d_model // self.n_heads)
         assert self.n_layers % 2 == 0
+
+        # Resolve intermediate eval fractions to concrete (sorted, unique) step
+        # indices inside (0, n_train_iters). These are observation-only points.
+        eval_steps = sorted(
+            {
+                s
+                for f in self.eval_at_fracs
+                if 0 < (s := int(self.n_train_iters * f)) < self.n_train_iters
+            }
+        )
+        object.__setattr__(self, "eval_at_steps", tuple(eval_steps))
 
 
 def get_mesh(config: Config):
@@ -1039,7 +1060,15 @@ def train_loop(config: Config):
             }
             logger.log(log_payload)
             target_reached_step = None
-            if step > 0 and (step % config.val_loss_every == 0):
+            # Regular validation runs on the val_loss_every cadence and may
+            # trigger early stop / checkpointing. Intermediate eval points add
+            # extra, observation-only validations (logged but never affecting
+            # the training path), de-duplicated against the regular cadence.
+            is_regular_eval = step > 0 and (step % config.val_loss_every == 0)
+            is_intermediate_eval = (
+                step in config.eval_at_steps and not is_regular_eval
+            )
+            if is_regular_eval or is_intermediate_eval:
                 val_loss = run_evaluation(
                     step,
                     config,
@@ -1051,7 +1080,8 @@ def train_loop(config: Config):
                     compiled_eval_fn,
                 )
                 if (
-                    config.early_stop_on_target
+                    is_regular_eval
+                    and config.early_stop_on_target
                     and val_loss is not None
                     and val_loss <= config.target_val_loss
                 ):
