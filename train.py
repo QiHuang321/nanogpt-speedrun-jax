@@ -258,6 +258,7 @@ class Config:
     muon_warmup_momentum_init: float = 0.85
     muon_warmup_momentum_final: float = 0.95
     muon_ns_iters: int = 5
+    muon_ns_iters_min: int = 2  # fewer Newton-Schulz iters early in training
     muon_eps: float = 1e-7
 
     # adam for non-matrices
@@ -367,11 +368,14 @@ def zeropower_via_newtonschulz5(G, steps, eps):
 
     def _update_loop(X):
         a, b, c = (3.4445, -4.7750, 2.0315)
-        for i in range(steps):
+
+        def _body(i, X):
             A = X @ X.T
             B = b * A + c * (A @ A)
-            X = a * X + B @ X
-        return X
+            return a * X + B @ X
+
+        # steps may be a dynamic (traced) iteration count, so use fori_loop
+        return fori_loop(0, steps, _body, X)
 
     def tall_case(g):
         X = g.T.astype(jnp.bfloat16)
@@ -398,7 +402,11 @@ def muon(
     n_train_iters: int,
     ns_iters: int,
     eps: float,
+    ns_iters_min: int = 2,
 ):
+    # Newton-Schulz iteration count ramps from ns_iters_min up to ns_iters over
+    # the first half of training, so early (noisy) steps use fewer iterations.
+    ns_ramp_iters = max(1, n_train_iters // 2)
 
     def init(params):
         m = tree_map(jnp.zeros_like, params)
@@ -412,6 +420,10 @@ def muon(
         momentum = warmup_momentum_init + frac * (
             warmup_momentum_final - warmup_momentum_init
         )
+        ns_progress = jnp.minimum(step / ns_ramp_iters, 1.0)
+        ns_iters_now = ns_iters_min + jnp.floor(
+            ns_progress * (ns_iters - ns_iters_min) + 0.5
+        ).astype(jnp.int32)
         new_m = tree_map(
             lambda m, g: (m + (1 - momentum).astype(m.dtype) * (g - m)).astype(m.dtype),
             state["m"],
@@ -422,7 +434,9 @@ def muon(
             g_nesterov = g + momentum.astype(m.dtype) * (m - g)
             update = (
                 lr.astype(p.dtype)
-                * zeropower_via_newtonschulz5(g_nesterov, ns_iters, eps).astype(p.dtype)
+                * zeropower_via_newtonschulz5(g_nesterov, ns_iters_now, eps).astype(
+                    p.dtype
+                )
                 * jnp.sqrt(jnp.maximum(1.0, g.shape[0] / g.shape[1])).astype(p.dtype)
             )
             return p - update
@@ -764,6 +778,7 @@ def init_optimizer(config: Config, params: PyTree, mesh: Mesh):
         config.n_train_iters,
         config.muon_ns_iters,
         config.muon_eps,
+        config.muon_ns_iters_min,
     )
 
     optimizer = multi_optimizer(
