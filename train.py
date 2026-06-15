@@ -217,6 +217,13 @@ class Config:
     f_warmdown_iters: float = 0.4
     n_warmdown_iters: int = 0
     val_loss_every: int = 125
+    # Diagnostic intermediate evaluations: this many EXTRA, read-only
+    # validation snapshots are taken at log-spaced steps inside the first
+    # val_loss_every window — where the loss moves fastest and the fixed
+    # cadence is blindest — to give a finer val-loss curve. These points never
+    # early-stop and never touch params/opt_state, so the training path is
+    # identical with or without them. Set to 0 to disable.
+    n_intermediate_evals: int = 4
     val_tokens: int = 10485760
     save_every: int = 0
 
@@ -1008,6 +1015,27 @@ def train_loop(config: Config):
         val_batches = load_dataset(val_config, logger, mesh, is_training=False)
         logger.msg(f"Loaded {len(val_batches)} validation batches for this process.")
 
+        # Diagnostic intermediate evaluation points (see Config.n_intermediate_evals):
+        # a handful of log-spaced steps inside the first val_loss_every window,
+        # where the loss changes fastest. We run an extra, read-only validation at
+        # each one — no early stop, no params/opt_state mutation — purely to fill in
+        # the val-loss curve. The set of train_step calls is therefore unchanged.
+        intermediate_eval_steps = set()
+        if config.n_intermediate_evals > 0 and config.val_loss_every > 1:
+            _log_pts = np.geomspace(
+                1, config.val_loss_every, config.n_intermediate_evals + 2
+            )
+            intermediate_eval_steps = {
+                int(s)
+                for s in _log_pts[1:-1].astype(int)
+                if 0 < int(s) < config.val_loss_every
+            }
+        if intermediate_eval_steps:
+            logger.msg(
+                "Intermediate eval points (diagnostic, no training-path change): "
+                f"{sorted(intermediate_eval_steps)}"
+            )
+
         logger.msg("Starting training...")
         last_step_time = time.time()
         for step in range(config.n_train_iters):
@@ -1040,7 +1068,23 @@ def train_loop(config: Config):
             }
             logger.log(log_payload)
             target_reached_step = None
-            if step > 0 and (step % config.val_loss_every == 0):
+            is_periodic_eval = step > 0 and (step % config.val_loss_every == 0)
+            # Intermediate diagnostic evaluation: read-only (logs val_loss but never
+            # early-stops or mutates state), so it leaves the training path untouched.
+            # These steps lie strictly inside the first window, so they never collide
+            # with a periodic eval, but guard anyway to avoid a double pass.
+            if step in intermediate_eval_steps and not is_periodic_eval:
+                run_evaluation(
+                    step,
+                    config,
+                    params,
+                    iter(val_batches),
+                    precomputed_params,
+                    mesh,
+                    logger,
+                    compiled_eval_fn,
+                )
+            if is_periodic_eval:
                 val_loss = run_evaluation(
                     step,
                     config,
@@ -1089,6 +1133,11 @@ def train_loop(config: Config):
 
 if __name__ == "__main__":
     config = Config()
+    # Optional override for the number of diagnostic intermediate eval points
+    # (see Config.n_intermediate_evals); preserved across the track presets below.
+    _n_im = os.environ.get("N_INTERMEDIATE_EVALS")
+    if _n_im is not None:
+        config = dataclasses.replace(config, n_intermediate_evals=int(_n_im))
     # Track selection via env var. "main" is the wall-clock speedrun (default,
     # what train.py was originally tuned for). "optimization" stops as soon
     # as val_loss <= target_val_loss is observed and reports the step count.
