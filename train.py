@@ -5,6 +5,7 @@ import time
 import uuid
 import dataclasses
 import datetime
+import json
 
 import jax
 # NOTE: do NOT call jax.distributed.initialize() — Cloud TPU auto-initializes
@@ -907,7 +908,17 @@ def train_step(
         lambda g: (g / n_grad_acc_steps).astype(g.dtype), final_grads_accum
     )
     new_params, new_opt_state = optimizer.update(final_grads, params, opt_state)
-    return new_params, new_opt_state, {"loss": avg_loss}
+    # Diagnostic only: global L2 norm of the (micro-batch-averaged) gradients
+    # that are handed to the optimizer. Accumulated in float32 for numerical
+    # stability. This value is not used to update params or opt_state, so
+    # training behavior is unchanged whether or not it is read.
+    grad_norm = jnp.sqrt(
+        sum(
+            jnp.sum(jnp.square(g.astype(jnp.float32)))
+            for g in tree_leaves(final_grads)
+        )
+    )
+    return new_params, new_opt_state, {"loss": avg_loss, "grad_norm": grad_norm}
 
 
 def eval_step(
@@ -994,6 +1005,17 @@ def train_loop(config: Config):
         logger.msg(f"Loaded {len(val_batches)} validation batches for this process.")
 
         logger.msg("Starting training...")
+        # Gradient-norm diagnostic: stream per-step global grad norms to a
+        # separate JSON file (master process only). This is a pure diagnostic
+        # side-channel — it never touches params, opt_state, or the training
+        # control flow, and it is written outside the logger's logs/ dir. The
+        # output path is overridable via the GRAD_NORM_FILE env var.
+        grad_norm_history = []
+        grad_norm_path = None
+        if logger.is_master:
+            grad_norm_path = os.environ.get(
+                "GRAD_NORM_FILE", f"grad_norms_{logger.run_id}.json"
+            )
         last_step_time = time.time()
         for step in range(config.n_train_iters):
             batched_x, batched_y = next(train_loader)
@@ -1024,6 +1046,13 @@ def train_loop(config: Config):
                 "batch_size": batch_size,
             }
             logger.log(log_payload)
+            if grad_norm_path is not None and "grad_norm" in metrics:
+                grad_norm_val = float(
+                    np.asarray(metrics["grad_norm"].addressable_data(0))
+                )
+                grad_norm_history.append({"step": step, "grad_norm": grad_norm_val})
+                with open(grad_norm_path, "w") as f:
+                    json.dump(grad_norm_history, f)
             target_reached_step = None
             if step > 0 and (step % config.val_loss_every == 0):
                 val_loss = run_evaluation(
