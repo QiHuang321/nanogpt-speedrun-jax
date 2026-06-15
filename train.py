@@ -217,6 +217,11 @@ class Config:
     f_warmdown_iters: float = 0.0  # handicap
     n_warmdown_iters: int = 0
     val_loss_every: int = 125
+    # Extra intermediate evaluation points: explicit step indices at which to
+    # run an additional (purely diagnostic) validation pass, on top of the
+    # periodic val_loss_every cadence. Evaluation is read-only and these points
+    # never trigger early stop, so the training path is unchanged.
+    eval_at_steps: tuple[int, ...] = ()
     val_tokens: int = 10485760
     save_every: int = 0
 
@@ -1025,7 +1030,12 @@ def train_loop(config: Config):
             }
             logger.log(log_payload)
             target_reached_step = None
-            if step > 0 and (step % config.val_loss_every == 0):
+            periodic_eval = step > 0 and (step % config.val_loss_every == 0)
+            # Intermediate evaluation points are extra, purely diagnostic
+            # validation passes; they never affect control flow (no early
+            # stop), so the training path matches a run with eval_at_steps=().
+            intermediate_eval = step in config.eval_at_steps
+            if periodic_eval or intermediate_eval:
                 val_loss = run_evaluation(
                     step,
                     config,
@@ -1037,7 +1047,8 @@ def train_loop(config: Config):
                     compiled_eval_fn,
                 )
                 if (
-                    config.early_stop_on_target
+                    periodic_eval
+                    and config.early_stop_on_target
                     and val_loss is not None
                     and val_loss <= config.target_val_loss
                 ):
