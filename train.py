@@ -419,8 +419,10 @@ def muon(
     def update(grads, params, state):
         step = state["step"]
         lr = base_lr * get_lr(step, n_warmup_iters, n_warmdown_iters, n_train_iters)
-        frac = jnp.minimum(step / momentum_warmup_steps, 1.0)
-        momentum = warmup_momentum_init + frac * (
+        # Exponential approach toward warmup_momentum_final, with
+        # momentum_warmup_steps as the time constant (was a linear ramp).
+        decay = jnp.exp(-step / momentum_warmup_steps)
+        momentum = warmup_momentum_final - decay * (
             warmup_momentum_final - warmup_momentum_init
         )
         # Adaptive Newton-Schulz iteration count: ramp linearly from
