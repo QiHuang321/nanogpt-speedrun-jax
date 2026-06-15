@@ -1,6 +1,7 @@
 import os
 import sys
 import glob
+import json
 import time
 import uuid
 import dataclasses
@@ -905,8 +906,14 @@ def train_step(
     final_grads = tree_map(
         lambda g: (g / n_grad_acc_steps).astype(g.dtype), final_grads_accum
     )
+    # Diagnostic only: global L2 norm of the post-accumulation gradient. Computed
+    # from the same `final_grads` that feed the update below, so it is purely
+    # observational and does not alter the optimizer step or training dynamics.
+    grad_norm = jnp.sqrt(
+        sum(jnp.sum(jnp.square(g.astype(jnp.float32))) for g in tree_leaves(final_grads))
+    )
     new_params, new_opt_state = optimizer.update(final_grads, params, opt_state)
-    return new_params, new_opt_state, {"loss": avg_loss}
+    return new_params, new_opt_state, {"loss": avg_loss, "grad_norm": grad_norm}
 
 
 def eval_step(
@@ -994,6 +1001,13 @@ def train_loop(config: Config):
 
         logger.msg("Starting training...")
         last_step_time = time.time()
+        # Gradient-norm diagnostic: append the per-step global gradient L2 norm
+        # to a standalone JSON file. Observational only and deliberately kept out
+        # of logs/ and records/; it never feeds back into the training loop.
+        grad_norm_diag = []
+        grad_norm_diag_path = (
+            f"grad_norm_diag_{logger.run_id}.json" if logger.is_master else None
+        )
         for step in range(config.n_train_iters):
             batched_x, batched_y = next(train_loader)
             n_grad_acc, _, seq_len = batched_x.shape
@@ -1023,6 +1037,13 @@ def train_loop(config: Config):
                 "batch_size": batch_size,
             }
             logger.log(log_payload)
+            if grad_norm_diag_path is not None:
+                grad_norm_val = float(
+                    np.asarray(metrics["grad_norm"].addressable_data(0))
+                )
+                grad_norm_diag.append({"step": step, "grad_norm": grad_norm_val})
+                with open(grad_norm_diag_path, "w") as f:
+                    json.dump(grad_norm_diag, f)
             target_reached_step = None
             if step > 0 and (step % config.val_loss_every == 0):
                 val_loss = run_evaluation(
