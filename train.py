@@ -261,7 +261,7 @@ class Config:
     muon_eps: float = 1e-7
 
     # adam for non-matrices
-    adam_nonmat_base_lr: float = 0.04
+    adam_nonmat_base_lr: float = 0.0266667
     adam_nonmat_beta1: float = 0.9
     adam_nonmat_beta2: float = 0.95
 
