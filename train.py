@@ -219,6 +219,11 @@ class Config:
     val_loss_every: int = 125
     val_tokens: int = 10485760
     save_every: int = 0
+    # Extra, explicit steps at which to also run validation, on top of the
+    # regular every-`val_loss_every` cadence. Evaluation is read-only (it never
+    # touches params/opt_state), so adding points here does not change the
+    # training path; it only adds observations of the loss curve.
+    eval_at_steps: tuple[int, ...] = ()
 
     # Speedrun track configuration:
     #   - main track (default): run for n_train_iters steps, report final val_loss.
@@ -1025,7 +1030,10 @@ def train_loop(config: Config):
             }
             logger.log(log_payload)
             target_reached_step = None
-            if step > 0 and (step % config.val_loss_every == 0):
+            do_eval = step > 0 and (
+                step % config.val_loss_every == 0 or step in config.eval_at_steps
+            )
+            if do_eval:
                 val_loss = run_evaluation(
                     step,
                     config,
