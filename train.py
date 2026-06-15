@@ -217,6 +217,11 @@ class Config:
     f_warmdown_iters: float = 0.0  # handicap
     n_warmdown_iters: int = 0
     val_loss_every: int = 125
+    # Extra step indices at which to run an additional ("intermediate")
+    # validation, on top of the regular val_loss_every cadence and the final
+    # eval. Purely observational — the result is logged but never triggers
+    # early stopping — so adding points here cannot change the training path.
+    intermediate_eval_steps: tuple[int, ...] = ()
     val_tokens: int = 10485760
     save_every: int = 0
 
@@ -1052,6 +1057,19 @@ def train_loop(config: Config):
                     })
                     target_reached_step = step
                     break
+            elif step > 0 and step in config.intermediate_eval_steps:
+                # Intermediate evaluation point: observe val_loss without
+                # affecting the training path (no early-stop check, no break).
+                run_evaluation(
+                    step,
+                    config,
+                    params,
+                    iter(val_batches),
+                    precomputed_params,
+                    mesh,
+                    logger,
+                    compiled_eval_fn,
+                )
             if config.save_every > 0 and step > 0 and (step % config.save_every == 0):
                 logger.dump(step, params, opt_state, config)
         logger.flush()
