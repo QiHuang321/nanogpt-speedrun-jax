@@ -213,8 +213,8 @@ class Config:
 
     # iteration handling
     n_train_iters: int = 1675
-    n_warmup_iters: int = 0
-    f_warmdown_iters: float = 0.0  # handicap
+    n_warmup_iters: int = 100
+    f_warmdown_iters: float = 0.2  # handicap
     n_warmdown_iters: int = 0
     val_loss_every: int = 125
     val_tokens: int = 10485760
@@ -317,13 +317,21 @@ class Optimizer(NamedTuple):
 
 
 def get_lr(it, n_warmup_iters, n_warmdown_iters, n_train_iters):
-    warmup_lr = (it + 1) / n_warmup_iters
-    constant_lr = 1.0
-    warmdown_lr = (n_train_iters - it) / n_warmdown_iters * (1.0 - 0.1) + 0.1
+    # Warmup-stable-decay (trapezoid) schedule, expressed as a multiplier on the
+    # peak (base) LR so the peak LR itself is unchanged:
+    #   - warmup: linearly ramp the multiplier 0 -> 1 over the first
+    #     n_warmup_iters steps
+    #   - stable: hold at the peak (1.0) through the middle of training
+    #   - decay:  linearly ramp 1 -> 0 over the final n_warmdown_iters steps
+    # The max(..., 1) guards keep the unused branches finite when a phase is
+    # disabled (n_warmup_iters == 0 or n_warmdown_iters == 0).
+    decay_start = n_train_iters - n_warmdown_iters
+    warmup_lr = (it + 1) / max(n_warmup_iters, 1)
+    decay_lr = (n_train_iters - it) / max(n_warmdown_iters, 1)
     lr = jnp.where(
         it < n_warmup_iters,
         warmup_lr,
-        jnp.where(it < n_train_iters - n_warmdown_iters, constant_lr, warmdown_lr),
+        jnp.where(it < decay_start, 1.0, decay_lr),
     )
     return lr
 
