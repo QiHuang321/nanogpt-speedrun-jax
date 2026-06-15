@@ -220,6 +220,13 @@ class Config:
     val_tokens: int = 10485760
     save_every: int = 0
 
+    # Extra, opt-in evaluation points layered on top of the regular
+    # `val_loss_every` schedule. Validation at these training steps runs the
+    # exact same read-only eval pass (e.g. for a finer learning curve around a
+    # region of interest). It does not touch params/opt_state/RNG/data, so the
+    # training path is unchanged. Empty by default => behavior identical.
+    eval_at_steps: tuple[int, ...] = ()
+
     # Speedrun track configuration:
     #   - main track (default): run for n_train_iters steps, report final val_loss.
     #   - optimization track: stop as soon as val_loss <= target_val_loss is hit
@@ -1040,7 +1047,9 @@ def train_loop(config: Config):
             }
             logger.log(log_payload)
             target_reached_step = None
-            if step > 0 and (step % config.val_loss_every == 0):
+            do_periodic_eval = step > 0 and (step % config.val_loss_every == 0)
+            do_intermediate_eval = step in config.eval_at_steps
+            if do_periodic_eval or do_intermediate_eval:
                 val_loss = run_evaluation(
                     step,
                     config,
