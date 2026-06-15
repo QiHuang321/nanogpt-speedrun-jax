@@ -217,6 +217,11 @@ class Config:
     f_warmdown_iters: float = 0.4
     n_warmdown_iters: int = 0
     val_loss_every: int = 125
+    # Extra, purely-observational validation points. Steps listed here get an
+    # additional val_loss eval (on top of the val_loss_every schedule), are
+    # logged, but never trigger early stopping — so the training trajectory and
+    # the stopping step are unchanged. Default empty: no behavior change.
+    intermediate_eval_steps: tuple[int, ...] = ()
     val_tokens: int = 10485760
     save_every: int = 0
 
@@ -1052,6 +1057,19 @@ def train_loop(config: Config):
                     })
                     target_reached_step = step
                     break
+            elif step in config.intermediate_eval_steps:
+                # Intermediate, observational-only evaluation point: log an extra
+                # val_loss without affecting early stop or any training state.
+                run_evaluation(
+                    step,
+                    config,
+                    params,
+                    iter(val_batches),
+                    precomputed_params,
+                    mesh,
+                    logger,
+                    compiled_eval_fn,
+                )
             if config.save_every > 0 and step > 0 and (step % config.save_every == 0):
                 logger.dump(step, params, opt_state, config)
         logger.flush()
