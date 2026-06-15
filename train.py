@@ -36,6 +36,7 @@ from jax.nn import dot_product_attention
 import einops
 
 import pickle
+import json
 
 import numpy as np
 
@@ -84,6 +85,12 @@ class Logger:
         os.makedirs(self.logdir, exist_ok=True)
         self.logfile = f"logs/{self.run_id}.txt"
         self.prev_metrics = None
+        # Gradient-norm diagnostic: written to a separate JSON file (kept out of
+        # logs/ and records/). Pure diagnostic — does not affect training.
+        self.grad_norm_file = os.environ.get(
+            "GRAD_NORM_FILE", f"grad_norm_{self.run_id}.json"
+        )
+        self.grad_norms = []
         with open(self.logfile, "w") as f:
             with open(sys.argv[0]) as f2:
                 code = f2.read()
@@ -153,6 +160,19 @@ class Logger:
         print(metrics)
         with open(self.logfile, "a") as f:
             f.write("[METRICS (latest)] " + str(metrics) + "\n")
+
+    def log_grad_norm(self, step: int, grad_norm: float, loss: float = None):
+        # Diagnostic-only hook: append the global gradient norm for this step and
+        # rewrite the separate JSON file so it stays a valid JSON document even
+        # if the run is interrupted. No effect on training.
+        if not self.is_master:
+            return
+        record = {"step": int(step), "grad_norm": float(grad_norm)}
+        if loss is not None:
+            record["loss"] = float(loss)
+        self.grad_norms.append(record)
+        with open(self.grad_norm_file, "w") as f:
+            json.dump(self.grad_norms, f)
 
     def dump(self, step: int, params: PyTree, opt_state: PyTree, config):
         if not self.is_master:
@@ -933,7 +953,13 @@ def train_step(
         lambda g: (g / n_grad_acc_steps).astype(g.dtype), final_grads_accum
     )
     new_params, new_opt_state = optimizer.update(final_grads, params, opt_state)
-    return new_params, new_opt_state, {"loss": avg_loss}
+    # Gradient-norm diagnostic: global L2 norm of the update gradients, computed
+    # in float32 for accuracy. This is a read-only side output and does not
+    # affect new_params/new_opt_state, so training is unchanged.
+    grad_norm = jnp.sqrt(
+        sum(jnp.sum(jnp.square(g.astype(jnp.float32))) for g in tree_leaves(final_grads))
+    )
+    return new_params, new_opt_state, {"loss": avg_loss, "grad_norm": grad_norm}
 
 
 def eval_step(
@@ -1037,6 +1063,10 @@ def train_loop(config: Config):
             # Read loss from local addressable shard (replicated scalar; no
             # cross-host gather). Forces a host sync, which also paces the loop.
             loss_val = float(np.asarray(metrics["loss"].addressable_data(0)))
+            # Gradient-norm diagnostic: read the replicated scalar from the local
+            # shard and append it to the separate JSON file. Purely diagnostic.
+            grad_norm_val = float(np.asarray(metrics["grad_norm"].addressable_data(0)))
+            logger.log_grad_norm(step, grad_norm_val, loss_val)
             now = time.time()
             step_secs = now - last_step_time
             last_step_time = now
