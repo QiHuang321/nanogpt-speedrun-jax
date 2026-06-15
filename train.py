@@ -3,6 +3,7 @@ import sys
 import glob
 import time
 import uuid
+import json
 import dataclasses
 import datetime
 
@@ -88,6 +89,11 @@ class Logger:
             with open(sys.argv[0]) as f2:
                 code = f2.read()
             f.write("=" * 100 + "\n" + code + "\n" + "=" * 100 + "\n")
+        # Gradient-norm diagnostic sink: a SEPARATE JSON Lines file (one JSON
+        # object per line), written outside logs/ and records/. Purely
+        # observational — it does not affect training in any way.
+        self.grad_norm_file = f"grad_norms_{self.run_id}.jsonl"
+        open(self.grad_norm_file, "w").close()  # start fresh / empty
         if os.environ.get("WANDB_API_KEY"):
             try:
                 import wandb
@@ -153,6 +159,16 @@ class Logger:
         print(metrics)
         with open(self.logfile, "a") as f:
             f.write("[METRICS (latest)] " + str(metrics) + "\n")
+
+    def log_grad_norm(self, step: int, grad_norm: float):
+        # Diagnostic-only: append one JSON record per step to the separate
+        # grad-norm file. Master process only; never touches logs/ or records/.
+        if not self.is_master:
+            return
+        with open(self.grad_norm_file, "a") as f:
+            f.write(
+                json.dumps({"step": int(step), "grad_norm": float(grad_norm)}) + "\n"
+            )
 
     def dump(self, step: int, params: PyTree, opt_state: PyTree, config):
         if not self.is_master:
@@ -906,8 +922,17 @@ def train_step(
     final_grads = tree_map(
         lambda g: (g / n_grad_acc_steps).astype(g.dtype), final_grads_accum
     )
+    # Diagnostic only: global L2 norm of the gradient actually used for the
+    # update (float32 accumulation). Does not feed back into the update, so the
+    # training trajectory is identical to without it.
+    grad_norm = jnp.sqrt(
+        sum(
+            jnp.sum(jnp.square(g.astype(jnp.float32)))
+            for g in tree_leaves(final_grads)
+        )
+    )
     new_params, new_opt_state = optimizer.update(final_grads, params, opt_state)
-    return new_params, new_opt_state, {"loss": avg_loss}
+    return new_params, new_opt_state, {"loss": avg_loss, "grad_norm": grad_norm}
 
 
 def eval_step(
@@ -1011,6 +1036,10 @@ def train_loop(config: Config):
             # Read loss from local addressable shard (replicated scalar; no
             # cross-host gather). Forces a host sync, which also paces the loop.
             loss_val = float(np.asarray(metrics["loss"].addressable_data(0)))
+            # Gradient-norm diagnostic: pulled from the same metrics dict and
+            # appended to a separate JSON file; not part of the training loop.
+            grad_norm_val = float(np.asarray(metrics["grad_norm"].addressable_data(0)))
+            logger.log_grad_norm(step, grad_norm_val)
             now = time.time()
             step_secs = now - last_step_time
             last_step_time = now
