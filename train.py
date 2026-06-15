@@ -435,8 +435,10 @@ def muon(
     def update(grads, params, state):
         step = state["step"]
         lr = base_lr * get_lr(step, n_warmup_iters, n_warmdown_iters, n_train_iters)
-        frac = jnp.minimum(step / momentum_warmup_steps, 1.0)
-        momentum = warmup_momentum_init + frac * (
+        # Exponential approach: momentum relaxes from init toward final, with
+        # momentum_warmup_steps acting as the exponential time constant.
+        decay = jnp.exp(-step / jnp.maximum(momentum_warmup_steps, 1))
+        momentum = warmup_momentum_final - decay * (
             warmup_momentum_final - warmup_momentum_init
         )
         new_m = tree_map(
