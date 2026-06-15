@@ -349,13 +349,19 @@ class Optimizer(NamedTuple):
 
 
 def get_lr(it, n_warmup_iters, n_warmdown_iters, n_train_iters):
+    # Warmup-stable-decay (trapezoid) schedule, returned as a multiplier in
+    # [0, 1] applied on top of each optimizer's base LR, so the peak LR is
+    # unchanged. The three legs of the trapezoid are:
+    #   1) linear warmup from 0 up to 1 over the first n_warmup_iters steps,
+    #   2) a stable plateau held at the peak (1) through the middle of the run,
+    #   3) linear decay from 1 back down to 0 over the final n_warmdown_iters.
     warmup_lr = (it + 1) / n_warmup_iters
-    constant_lr = 1.0
-    warmdown_lr = (n_train_iters - it) / n_warmdown_iters * (1.0 - 0.1) + 0.1
+    stable_lr = 1.0
+    decay_lr = (n_train_iters - it) / n_warmdown_iters
     lr = jnp.where(
         it < n_warmup_iters,
         warmup_lr,
-        jnp.where(it < n_train_iters - n_warmdown_iters, constant_lr, warmdown_lr),
+        jnp.where(it < n_train_iters - n_warmdown_iters, stable_lr, decay_lr),
     )
     return lr
 
