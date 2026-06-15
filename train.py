@@ -35,6 +35,7 @@ from jax.nn import dot_product_attention
 
 import einops
 
+import json
 import pickle
 
 import numpy as np
@@ -84,6 +85,13 @@ class Logger:
         os.makedirs(self.logdir, exist_ok=True)
         self.logfile = f"logs/{self.run_id}.txt"
         self.prev_metrics = None
+        # Gradient-norm diagnostic: written to a standalone JSON file in the
+        # working directory (kept out of logs/ so it never collides with the
+        # checkpoint/metrics pipeline). Records accumulate in memory and the
+        # file is rewritten on each update so partial runs still produce valid
+        # JSON.
+        self.grad_norm_file = f"grad_norms_{self.run_id}.json"
+        self.grad_norm_records = []
         with open(self.logfile, "w") as f:
             with open(sys.argv[0]) as f2:
                 code = f2.read()
@@ -153,6 +161,21 @@ class Logger:
         print(metrics)
         with open(self.logfile, "a") as f:
             f.write("[METRICS (latest)] " + str(metrics) + "\n")
+
+    def log_grad_norm(self, step: int, grad_norms: dict):
+        # Diagnostic-only sink: appends one record of gradient norms per call and
+        # rewrites the standalone JSON file. Independent of the metrics/wandb
+        # pipeline and has no effect on training.
+        if not self.is_master:
+            return
+        record = {"step": int(step)}
+        record.update({k: float(v) for k, v in grad_norms.items()})
+        self.grad_norm_records.append(record)
+        try:
+            with open(self.grad_norm_file, "w") as f:
+                json.dump(self.grad_norm_records, f, indent=2)
+        except Exception as e:
+            print(f"[grad_norm] write failed: {e}")
 
     def dump(self, step: int, params: PyTree, opt_state: PyTree, config):
         if not self.is_master:
@@ -274,6 +297,10 @@ class Config:
     rope_base: float = 1024
     vocab_size: int = 50304
     dtype: str = "bfloat16"
+
+    # diagnostics (no training effect): gradient-norm logging to a separate JSON
+    grad_norm_diagnostics: bool = True
+    grad_norm_log_every: int = 10
 
     # sharding
     weight_sharding = None
@@ -877,6 +904,24 @@ def loss_fn(params, batch, precomputed_params, config):
 # ======================== training ============================
 
 
+def compute_grad_norms(grads: PyTree) -> dict:
+    # Diagnostic only: global and per-top-level-group L2 gradient norms,
+    # accumulated in float32 from the already-computed gradients. These values
+    # are returned as metrics and never feed back into the optimizer update, so
+    # the trained weights are bit-identical with or without this hook.
+    def _l2(tree):
+        leaves = tree_leaves(tree)
+        if not leaves:
+            return jnp.zeros((), dtype=jnp.float32)
+        sq = sum(jnp.sum(jnp.square(leaf.astype(jnp.float32))) for leaf in leaves)
+        return jnp.sqrt(sq)
+
+    norms = {"global": _l2(grads)}
+    for name, subtree in grads.items():
+        norms[name] = _l2(subtree)
+    return norms
+
+
 def train_step(
     config: Config,
     params: PyTree,
@@ -907,7 +952,12 @@ def train_step(
         lambda g: (g / n_grad_acc_steps).astype(g.dtype), final_grads_accum
     )
     new_params, new_opt_state = optimizer.update(final_grads, params, opt_state)
-    return new_params, new_opt_state, {"loss": avg_loss}
+    metrics = {"loss": avg_loss}
+    if config.grad_norm_diagnostics:
+        # Gradient-norm diagnostic computed from final_grads above; does not
+        # affect the optimizer update or the returned params/opt_state.
+        metrics["grad_norms"] = compute_grad_norms(final_grads)
+    return new_params, new_opt_state, metrics
 
 
 def eval_step(
@@ -1024,6 +1074,18 @@ def train_loop(config: Config):
                 "batch_size": batch_size,
             }
             logger.log(log_payload)
+            if (
+                config.grad_norm_diagnostics
+                and "grad_norms" in metrics
+                and step % config.grad_norm_log_every == 0
+            ):
+                # Pull replicated scalar norms from the local addressable shard
+                # (same pattern as the loss read above) and persist to JSON.
+                grad_norms_host = {
+                    name: float(np.asarray(v.addressable_data(0)))
+                    for name, v in metrics["grad_norms"].items()
+                }
+                logger.log_grad_norm(step, grad_norms_host)
             target_reached_step = None
             if step > 0 and (step % config.val_loss_every == 0):
                 val_loss = run_evaluation(
