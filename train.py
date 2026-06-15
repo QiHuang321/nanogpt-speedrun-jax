@@ -258,6 +258,7 @@ class Config:
     muon_warmup_momentum_init: float = 0.85
     muon_warmup_momentum_final: float = 0.95
     muon_ns_iters: int = 5
+    muon_ns_iters_min: int = 2  # NS iters used early in training; ramps up to muon_ns_iters
     muon_eps: float = 1e-7
 
     # adam for non-matrices
@@ -372,11 +373,16 @@ def zeropower_via_newtonschulz5(G, steps, eps):
 
     def _update_loop(X):
         a, b, c = (3.4445, -4.7750, 2.0315)
-        for i in range(steps):
+
+        # `steps` may be a traced (step-dependent) scalar, so use a dynamic-bound
+        # fori_loop instead of unrolling a Python range.
+        def _body(i, X):
             A = X @ X.T
             B = b * A + c * (A @ A)
             X = a * X + B @ X
-        return X
+            return X
+
+        return fori_loop(0, steps, _body, X)
 
     def tall_case(g):
         X = g.T.astype(jnp.bfloat16)
@@ -402,6 +408,7 @@ def muon(
     n_warmdown_iters: int,
     n_train_iters: int,
     ns_iters: int,
+    ns_iters_min: int,
     eps: float,
 ):
 
@@ -423,11 +430,21 @@ def muon(
             grads,
         )
 
+        # Adaptive Newton-Schulz step count: orthogonalization can be coarse
+        # early (noisy grads), so linearly ramp from ns_iters_min up to ns_iters
+        # over the course of training.
+        progress = step / max(n_train_iters - 1, 1)
+        ns_iters_now = jnp.clip(
+            jnp.round(ns_iters_min + (ns_iters - ns_iters_min) * progress),
+            ns_iters_min,
+            ns_iters,
+        ).astype(jnp.int32)
+
         def _update_leaf(g, p, m):
             g_nesterov = g + momentum.astype(m.dtype) * (m - g)
             update = (
                 lr.astype(p.dtype)
-                * zeropower_via_newtonschulz5(g_nesterov, ns_iters, eps).astype(p.dtype)
+                * zeropower_via_newtonschulz5(g_nesterov, ns_iters_now, eps).astype(p.dtype)
                 * jnp.sqrt(jnp.maximum(1.0, g.shape[0] / g.shape[1])).astype(p.dtype)
             )
             return p - update
@@ -768,6 +785,7 @@ def init_optimizer(config: Config, params: PyTree, mesh: Mesh):
         config.n_warmdown_iters,
         config.n_train_iters,
         config.muon_ns_iters,
+        config.muon_ns_iters_min,
         config.muon_eps,
     )
 
