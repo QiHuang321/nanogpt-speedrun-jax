@@ -220,6 +220,14 @@ class Config:
     val_tokens: int = 10485760
     save_every: int = 0
 
+    # intermediate evaluation points (no training-path change): in addition to
+    # the regular val_loss_every cadence and the final eval, also run validation
+    # at these fractions of the run. Evaluation is read-only — it does not touch
+    # params, optimizer state, RNG, or the data cursor — so the training path is
+    # unaffected. Concrete step indices are derived in __post_init__.
+    intermediate_eval_fracs: tuple[float, ...] = (0.25, 0.5, 0.75)
+    intermediate_eval_steps: tuple[int, ...] = ()
+
     # Speedrun track configuration:
     #   - main track (default): run for n_train_iters steps, report final val_loss.
     #   - optimization track: stop as soon as val_loss <= target_val_loss is hit
@@ -289,6 +297,23 @@ class Config:
         assert self.d_model % self.n_heads == 0
         object.__setattr__(self, "d_head", self.d_model // self.n_heads)
         assert self.n_layers % 2 == 0
+
+        # Derive concrete intermediate-eval step indices from the requested
+        # fractions of the run (dedup + sorted; endpoints are dropped since they
+        # are already covered by the regular cadence and the final eval).
+        object.__setattr__(
+            self,
+            "intermediate_eval_steps",
+            tuple(
+                sorted(
+                    {
+                        int(frac * self.n_train_iters)
+                        for frac in self.intermediate_eval_fracs
+                        if 0.0 < frac < 1.0
+                    }
+                )
+            ),
+        )
 
 
 def get_mesh(config: Config):
@@ -1025,7 +1050,10 @@ def train_loop(config: Config):
             }
             logger.log(log_payload)
             target_reached_step = None
-            if step > 0 and (step % config.val_loss_every == 0):
+            if step > 0 and (
+                step % config.val_loss_every == 0
+                or step in config.intermediate_eval_steps
+            ):
                 val_loss = run_evaluation(
                     step,
                     config,
