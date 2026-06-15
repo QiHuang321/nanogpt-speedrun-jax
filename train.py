@@ -5,6 +5,7 @@ import time
 import uuid
 import dataclasses
 import datetime
+import json
 
 import jax
 # NOTE: do NOT call jax.distributed.initialize() — Cloud TPU auto-initializes
@@ -907,7 +908,14 @@ def train_step(
         lambda g: (g / n_grad_acc_steps).astype(g.dtype), final_grads_accum
     )
     new_params, new_opt_state = optimizer.update(final_grads, params, opt_state)
-    return new_params, new_opt_state, {"loss": avg_loss}
+    # Diagnostic only: global L2 norm of the (accumulated, averaged) gradient
+    # that is actually fed to the optimizer. Cast to f32 before squaring so
+    # bf16 grads don't lose precision in the reduction. This is an extra output
+    # and does not affect new_params / new_opt_state.
+    grad_norm = jnp.sqrt(
+        sum(jnp.sum(jnp.square(g.astype(jnp.float32))) for g in tree_leaves(final_grads))
+    )
+    return new_params, new_opt_state, {"loss": avg_loss, "grad_norm": grad_norm}
 
 
 def eval_step(
@@ -965,6 +973,17 @@ def run_evaluation(
 def train_loop(config: Config):
     logger = Logger()
     mesh = get_mesh(config)
+
+    # Gradient-norm diagnostic: master process appends the per-step grad norm
+    # to a standalone JSON file (separate from the .txt log under logs/). This
+    # is read-only w.r.t. training — purely an observability hook. Path is
+    # overridable via GRAD_NORM_JSON, matching the repo's env-var conventions.
+    grad_norm_log_path = None
+    grad_norm_history = []
+    if logger.is_master:
+        grad_norm_log_path = os.environ.get(
+            "GRAD_NORM_JSON", f"grad_norms_{logger.run_id}.json"
+        )
 
     with mesh:
         params, precomputed_params = init_params(config, mesh)
@@ -1024,6 +1043,19 @@ def train_loop(config: Config):
                 "batch_size": batch_size,
             }
             logger.log(log_payload)
+            if grad_norm_log_path is not None:
+                # Same local-shard read as the loss above (replicated scalar);
+                # forces no extra cross-host gather. Failures here must never
+                # interrupt training, so the file write is best-effort.
+                grad_norm_val = float(
+                    np.asarray(metrics["grad_norm"].addressable_data(0))
+                )
+                grad_norm_history.append({"step": step, "grad_norm": grad_norm_val})
+                try:
+                    with open(grad_norm_log_path, "w") as f:
+                        json.dump(grad_norm_history, f)
+                except Exception as e:
+                    logger.msg(f"[grad-norm] write failed: {e}")
             target_reached_step = None
             if step > 0 and (step % config.val_loss_every == 0):
                 val_loss = run_evaluation(
