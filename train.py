@@ -220,6 +220,13 @@ class Config:
     val_tokens: int = 10485760
     save_every: int = 0
 
+    # Intermediate evaluation points: extra steps at which to run a validation
+    # pass, on top of the regular val_loss_every cadence. Purely observational
+    # (finer-grained loss-curve tracking) — these never trigger early stopping
+    # and never alter the training path (parameters, optimizer, or step count).
+    # Empty by default so standard runs are unchanged.
+    eval_at_steps: tuple[int, ...] = ()
+
     # Speedrun track configuration:
     #   - main track (default): run for n_train_iters steps, report final val_loss.
     #   - optimization track: stop as soon as val_loss <= target_val_loss is hit
@@ -1078,6 +1085,21 @@ def train_loop(config: Config):
                     })
                     target_reached_step = step
                     break
+            elif step > 0 and step in config.eval_at_steps:
+                # Intermediate evaluation point: an extra validation pass for
+                # finer-grained loss-curve tracking at a step that doesn't fall
+                # on the val_loss_every cadence. Observational only — it does
+                # not trigger early stopping or otherwise change the run.
+                run_evaluation(
+                    step,
+                    config,
+                    params,
+                    iter(val_batches),
+                    precomputed_params,
+                    mesh,
+                    logger,
+                    compiled_eval_fn,
+                )
             if config.save_every > 0 and step > 0 and (step % config.save_every == 0):
                 logger.dump(step, params, opt_state, config)
         logger.flush()
