@@ -416,10 +416,12 @@ def muon(
     def update(grads, params, state):
         step = state["step"]
         lr = base_lr * get_lr(step, n_warmup_iters, n_warmdown_iters, n_train_iters)
-        frac = jnp.minimum(step / momentum_warmup_steps, 1.0)
-        momentum = warmup_momentum_init + frac * (
+        # Momentum follows an exponential approach toward the final value, with
+        # momentum_warmup_steps acting as the time constant (rather than a linear
+        # ramp completing exactly at momentum_warmup_steps).
+        momentum = warmup_momentum_final - (
             warmup_momentum_final - warmup_momentum_init
-        )
+        ) * jnp.exp(-step / momentum_warmup_steps)
         ns_progress = jnp.minimum(step / ns_ramp_iters, 1.0)
         ns_iters_now = ns_iters_min + jnp.floor(
             ns_progress * (ns_iters - ns_iters_min) + 0.5
