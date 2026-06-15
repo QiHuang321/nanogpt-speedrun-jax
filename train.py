@@ -5,6 +5,7 @@ import time
 import uuid
 import dataclasses
 import datetime
+import json
 
 import jax
 # NOTE: do NOT call jax.distributed.initialize() — Cloud TPU auto-initializes
@@ -84,6 +85,9 @@ class Logger:
         os.makedirs(self.logdir, exist_ok=True)
         self.logfile = f"logs/{self.run_id}.txt"
         self.prev_metrics = None
+        # Separate gradient-norm diagnostic stream. Intentionally kept out of
+        # logs/ and records/; written as JSON-lines, one object per train step.
+        self.grad_norm_logfile = f"grad_norms_{self.run_id}.jsonl"
         with open(self.logfile, "w") as f:
             with open(sys.argv[0]) as f2:
                 code = f2.read()
@@ -153,6 +157,15 @@ class Logger:
         print(metrics)
         with open(self.logfile, "a") as f:
             f.write("[METRICS (latest)] " + str(metrics) + "\n")
+
+    def log_grad_norm(self, record: dict):
+        # Diagnostic-only hook: append one JSON object per training step to a
+        # dedicated JSON-lines file. Entirely separate from the normal metrics /
+        # checkpoint logging and never reads or mutates the training state.
+        if not self.is_master:
+            return
+        with open(self.grad_norm_logfile, "a") as f:
+            f.write(json.dumps(record) + "\n")
 
     def dump(self, step: int, params: PyTree, opt_state: PyTree, config):
         if not self.is_master:
@@ -909,8 +922,18 @@ def train_step(
     final_grads = tree_map(
         lambda g: (g / n_grad_acc_steps).astype(g.dtype), final_grads_accum
     )
+    # Diagnostic only: global L2 norm of the averaged gradient. This is a
+    # read-only reduction over final_grads (accumulated in float32 for
+    # stability) and is independent of the parameter update below, so the
+    # training trajectory is identical with or without it.
+    grad_norm = jnp.sqrt(
+        sum(
+            jnp.sum(jnp.square(g.astype(jnp.float32)))
+            for g in tree_leaves(final_grads)
+        )
+    )
     new_params, new_opt_state = optimizer.update(final_grads, params, opt_state)
-    return new_params, new_opt_state, {"loss": avg_loss}
+    return new_params, new_opt_state, {"loss": avg_loss, "grad_norm": grad_norm}
 
 
 def eval_step(
@@ -1027,6 +1050,15 @@ def train_loop(config: Config):
                 "batch_size": batch_size,
             }
             logger.log(log_payload)
+            # Gradient-norm diagnostic hook: read the replicated scalar from the
+            # local shard and append it to the separate JSON-lines file. Purely
+            # observational — it does not feed back into params/opt_state.
+            grad_norm_val = float(
+                np.asarray(metrics["grad_norm"].addressable_data(0))
+            )
+            logger.log_grad_norm(
+                {"step": step, "grad_norm": grad_norm_val, "loss": loss_val}
+            )
             target_reached_step = None
             do_eval = step > 0 and (
                 step % config.val_loss_every == 0 or step in config.eval_at_steps
