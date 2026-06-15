@@ -220,6 +220,13 @@ class Config:
     val_tokens: int = 10485760
     save_every: int = 0
 
+    # Extra (intermediate) step indices at which to run validation, in addition
+    # to the regular every-`val_loss_every` schedule. Purely an evaluation
+    # hook: validation is read-only over params and uses its own val_batches
+    # iterator, so adding points here does not change the training path.
+    # Default empty tuple => no change to existing runs.
+    intermediate_eval_steps: tuple[int, ...] = ()
+
     # Speedrun track configuration:
     #   - main track (default): run for n_train_iters steps, report final val_loss.
     #   - optimization track: stop as soon as val_loss <= target_val_loss is hit
@@ -1025,7 +1032,9 @@ def train_loop(config: Config):
             }
             logger.log(log_payload)
             target_reached_step = None
-            if step > 0 and (step % config.val_loss_every == 0):
+            is_periodic_eval = step > 0 and (step % config.val_loss_every == 0)
+            is_intermediate_eval = step in config.intermediate_eval_steps
+            if is_periodic_eval or is_intermediate_eval:
                 val_loss = run_evaluation(
                     step,
                     config,
