@@ -3,6 +3,7 @@ import sys
 import glob
 import time
 import uuid
+import json
 import dataclasses
 import datetime
 
@@ -197,6 +198,25 @@ def filter_pytree(pytree: PyTree, condition_map: Any) -> PyTree | None:
     return None
 
 
+def write_grad_norm_log(path: str, run_id: str, records: list):
+    """Write the gradient-norm diagnostic to a standalone JSON file.
+
+    This is intentionally kept separate from the main text/wandb logs (and from
+    the logs/ and records/ trees): it is a read-only diagnostic trace that never
+    affects training. Safe to call repeatedly — it rewrites the full file each
+    time via an atomic tmp-then-replace, so a crash mid-run still leaves a valid
+    JSON file behind.
+    """
+    payload = {"run_id": run_id, "records": records}
+    dirname = os.path.dirname(path)
+    if dirname:
+        os.makedirs(dirname, exist_ok=True)
+    tmp_path = path + ".tmp"
+    with open(tmp_path, "w") as f:
+        json.dump(payload, f, indent=2)
+    os.replace(tmp_path, path)
+
+
 # ====================== training config =========================
 
 
@@ -226,6 +246,16 @@ class Config:
     # iterator, so adding points here does not change the training path.
     # Default empty tuple => no change to existing runs.
     intermediate_eval_steps: tuple[int, ...] = ()
+
+    # Gradient-norm diagnostic (read-only). When set to a non-empty path, the
+    # train step additionally returns the global L2 norm of the averaged
+    # gradients and the loop appends a per-step record to this JSON file. It is
+    # purely diagnostic: the norm is computed from the grads the optimizer
+    # already consumes and never feeds back into params/opt_state, so the
+    # training path is unchanged. Gated on this static field, so when empty
+    # (the default) the jitted graph and every run are byte-identical to before
+    # and nothing is written.
+    grad_norm_log: str = ""
 
     # Speedrun track configuration:
     #   - main track (default): run for n_train_iters steps, report final val_loss.
@@ -914,7 +944,18 @@ def train_step(
         lambda g: (g / n_grad_acc_steps).astype(g.dtype), final_grads_accum
     )
     new_params, new_opt_state = optimizer.update(final_grads, params, opt_state)
-    return new_params, new_opt_state, {"loss": avg_loss}
+    metrics = {"loss": avg_loss}
+    if config.grad_norm_log:
+        # Read-only diagnostic: global L2 grad norm over the averaged grads the
+        # optimizer just consumed. Accumulated in float32 to avoid bf16 loss.
+        # Does not feed back into params/opt_state; gated on a static config
+        # field so the default (disabled) graph is unchanged.
+        grad_sq = sum(
+            jnp.sum(jnp.square(g.astype(jnp.float32)))
+            for g in tree_leaves(final_grads)
+        )
+        metrics["grad_norm"] = jnp.sqrt(grad_sq)
+    return new_params, new_opt_state, metrics
 
 
 def eval_step(
@@ -1002,6 +1043,7 @@ def train_loop(config: Config):
 
         logger.msg("Starting training...")
         last_step_time = time.time()
+        grad_norm_records = []
         for step in range(config.n_train_iters):
             batched_x, batched_y = next(train_loader)
             n_grad_acc, _, seq_len = batched_x.shape
@@ -1031,6 +1073,25 @@ def train_loop(config: Config):
                 "batch_size": batch_size,
             }
             logger.log(log_payload)
+            if config.grad_norm_log and logger.is_master:
+                # Read local addressable shard (replicated scalar; no cross-host
+                # gather), then append to the standalone JSON diagnostic trace.
+                grad_norm_val = float(
+                    np.asarray(metrics["grad_norm"].addressable_data(0))
+                )
+                grad_norm_records.append(
+                    {
+                        "step": step,
+                        "grad_norm": grad_norm_val,
+                        "loss": loss_val,
+                        "seq_len": seq_len,
+                        "batch_size": batch_size,
+                    }
+                )
+                if step % config.val_loss_every == 0:
+                    write_grad_norm_log(
+                        config.grad_norm_log, logger.run_id, grad_norm_records
+                    )
             target_reached_step = None
             is_periodic_eval = step > 0 and (step % config.val_loss_every == 0)
             is_intermediate_eval = step in config.intermediate_eval_steps
@@ -1078,6 +1139,8 @@ def train_loop(config: Config):
         )
         logger.flush()
         logger.msg("Training finished.")
+        if config.grad_norm_log and logger.is_master:
+            write_grad_norm_log(config.grad_norm_log, logger.run_id, grad_norm_records)
         logger.dump(step, params, opt_state, config)
 
 
@@ -1113,4 +1176,14 @@ if __name__ == "__main__":
         )
     else:
         print(f"[track] MAIN (wall-clock) track", flush=True)
+    # Optional read-only gradient-norm diagnostic. Set GRAD_NORM_LOG to a file
+    # path to enable; unset (default) leaves the training path byte-identical
+    # and writes nothing. Kept out of logs/ and records/ by convention.
+    grad_norm_log = os.environ.get("GRAD_NORM_LOG", config.grad_norm_log)
+    if grad_norm_log:
+        config = dataclasses.replace(config, grad_norm_log=grad_norm_log)
+        print(
+            f"[grad-norm] read-only diagnostic enabled -> {grad_norm_log}",
+            flush=True,
+        )
     train_loop(config)
