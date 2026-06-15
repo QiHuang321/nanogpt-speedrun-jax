@@ -36,6 +36,7 @@ from jax.nn import dot_product_attention
 import einops
 
 import pickle
+import json
 
 import numpy as np
 
@@ -924,7 +925,13 @@ def train_step(
         lambda g: (g / n_grad_acc_steps).astype(g.dtype), final_grads_accum
     )
     new_params, new_opt_state = optimizer.update(final_grads, params, opt_state)
-    return new_params, new_opt_state, {"loss": avg_loss}
+    # Diagnostic only — does NOT affect the update above. Global L2 norm of the
+    # post-accumulation gradient, surfaced as a metric for the grad-norm hook
+    # (cast to fp32 so the reduction doesn't lose precision / overflow in bf16).
+    grad_norm = jnp.sqrt(
+        sum(jnp.sum(jnp.square(g.astype(jnp.float32))) for g in tree_leaves(final_grads))
+    )
+    return new_params, new_opt_state, {"loss": avg_loss, "grad_norm": grad_norm}
 
 
 def eval_step(
@@ -1012,6 +1019,25 @@ def train_loop(config: Config):
 
         logger.msg("Starting training...")
         last_step_time = time.time()
+
+        # Gradient-norm diagnostic hook: collect the per-step global grad norm
+        # (computed inside train_step; has no effect on the update) and persist
+        # it to a standalone JSON file kept separate from the main run logs.
+        grad_norm_records = []
+        grad_norm_path = (
+            f"grad_norm_diagnostics_{logger.run_id}.json"
+            if logger.is_master
+            else None
+        )
+
+        def _flush_grad_norms():
+            if grad_norm_path is None:
+                return
+            with open(grad_norm_path, "w") as f:
+                json.dump(
+                    {"run_id": logger.run_id, "grad_norms": grad_norm_records}, f
+                )
+
         for step in range(config.n_train_iters):
             batched_x, batched_y = next(train_loader)
             n_grad_acc, _, seq_len = batched_x.shape
@@ -1028,6 +1054,7 @@ def train_loop(config: Config):
             # Read loss from local addressable shard (replicated scalar; no
             # cross-host gather). Forces a host sync, which also paces the loop.
             loss_val = float(np.asarray(metrics["loss"].addressable_data(0)))
+            grad_norm_val = float(np.asarray(metrics["grad_norm"].addressable_data(0)))
             now = time.time()
             step_secs = now - last_step_time
             last_step_time = now
@@ -1041,6 +1068,10 @@ def train_loop(config: Config):
                 "batch_size": batch_size,
             }
             logger.log(log_payload)
+            if logger.is_master:
+                grad_norm_records.append({"step": step, "grad_norm": grad_norm_val})
+                if step % config.val_loss_every == 0:
+                    _flush_grad_norms()
             target_reached_step = None
             if step > 0 and (step % config.val_loss_every == 0):
                 val_loss = run_evaluation(
@@ -1085,6 +1116,7 @@ def train_loop(config: Config):
             compiled_eval_fn,
         )
         logger.flush()
+        _flush_grad_norms()
         logger.msg("Training finished.")
         logger.dump(step, params, opt_state, config)
 
