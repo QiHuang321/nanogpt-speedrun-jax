@@ -220,6 +220,12 @@ class Config:
     val_loss_every: int = 125
     val_tokens: int = 10485760
     save_every: int = 0
+    # Intermediate evaluation points (observational only — does NOT change the
+    # training path). In addition to the regular val_loss_every cadence,
+    # validation is also run at each step index listed here. Lets us sample the
+    # loss curve at specific milestones (e.g. early steps) without lowering
+    # val_loss_every globally. Empty by default, so behavior is unchanged.
+    eval_at_steps: tuple[int, ...] = ()
 
     # Speedrun track configuration:
     #   - main track (default): run for n_train_iters steps, report final val_loss.
@@ -1059,7 +1065,9 @@ def train_loop(config: Config):
                     ),
                 })
             target_reached_step = None
-            if step > 0 and (step % config.val_loss_every == 0):
+            if step > 0 and (
+                step % config.val_loss_every == 0 or step in config.eval_at_steps
+            ):
                 val_loss = run_evaluation(
                     step,
                     config,
@@ -1142,4 +1150,17 @@ if __name__ == "__main__":
         )
     else:
         print(f"[track] MAIN (wall-clock) track", flush=True)
+    # Optional intermediate evaluation points, comma-separated step indices.
+    # Observational only (extra validation passes); does not alter training.
+    _eval_at_steps = os.environ.get("EVAL_AT_STEPS", "").strip()
+    if _eval_at_steps:
+        extra_eval_steps = tuple(
+            int(s) for s in _eval_at_steps.split(",") if s.strip()
+        )
+        config = dataclasses.replace(config, eval_at_steps=extra_eval_steps)
+        print(
+            f"[eval] intermediate evaluation points enabled at steps "
+            f"{extra_eval_steps}",
+            flush=True,
+        )
     train_loop(config)
