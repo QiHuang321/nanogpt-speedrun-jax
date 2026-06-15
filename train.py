@@ -220,6 +220,13 @@ class Config:
     val_tokens: int = 10485760
     save_every: int = 0
 
+    # Extra, purely-diagnostic evaluation points, in addition to the regular
+    # val_loss_every cadence. Validation only reads params (it never touches
+    # params/opt_state or the training data cursor), so adding eval steps here
+    # does not change the training path. These do NOT trigger early stopping —
+    # they are observational only.
+    intermediate_val_steps: tuple[int, ...] = ()
+
     # Speedrun track configuration:
     #   - main track (default): run for n_train_iters steps, report final val_loss.
     #   - optimization track: stop as soon as val_loss <= target_val_loss is hit
@@ -1025,7 +1032,9 @@ def train_loop(config: Config):
             }
             logger.log(log_payload)
             target_reached_step = None
-            if step > 0 and (step % config.val_loss_every == 0):
+            is_regular_val = step > 0 and (step % config.val_loss_every == 0)
+            is_intermediate_val = step in config.intermediate_val_steps
+            if is_regular_val or is_intermediate_val:
                 val_loss = run_evaluation(
                     step,
                     config,
@@ -1037,7 +1046,8 @@ def train_loop(config: Config):
                     compiled_eval_fn,
                 )
                 if (
-                    config.early_stop_on_target
+                    is_regular_val
+                    and config.early_stop_on_target
                     and val_loss is not None
                     and val_loss <= config.target_val_loss
                 ):
