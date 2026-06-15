@@ -415,7 +415,12 @@ def muon(
     def update(grads, params, state):
         step = state["step"]
         lr = base_lr * get_lr(step, n_warmup_iters, n_warmdown_iters, n_train_iters)
-        frac = jnp.minimum(step / momentum_warmup_steps, 1.0)
+        # Exponential approach to the asymptote: the gap to the final momentum
+        # decays as exp(-step / momentum_warmup_steps) rather than closing
+        # linearly, so momentum rises quickly early and eases into the final
+        # value. momentum_warmup_steps is the characteristic time constant
+        # (frac ~ 0.63 after that many steps).
+        frac = 1.0 - jnp.exp(-step / momentum_warmup_steps)
         momentum = warmup_momentum_init + frac * (
             warmup_momentum_final - warmup_momentum_init
         )
