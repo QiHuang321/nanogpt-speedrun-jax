@@ -257,7 +257,14 @@ class Config:
     muon_momentum_warmup_steps: int = 500
     muon_warmup_momentum_init: float = 0.85
     muon_warmup_momentum_final: float = 0.95
-    muon_ns_iters: int = 2  # handicap
+    muon_ns_iters: int = 2  # handicap (final / max Newton-Schulz iterations)
+    # The Newton-Schulz iteration count is ramped over training: fewer
+    # iterations early (when gradients are noisy and precise orthogonalization
+    # buys little), rising to muon_ns_iters. muon_ns_iters_min is the count used
+    # at step 0; the ramp completes after muon_ns_iters_warmup_frac of training.
+    # Set muon_ns_iters_min >= muon_ns_iters to disable the ramp.
+    muon_ns_iters_min: int = 1
+    muon_ns_iters_warmup_frac: float = 0.5
     muon_eps: float = 1e-7
 
     # adam for non-matrices
@@ -367,11 +374,15 @@ def zeropower_via_newtonschulz5(G, steps, eps):
 
     def _update_loop(X):
         a, b, c = (3.4445, -4.7750, 2.0315)
-        for i in range(steps):
+
+        def _ns_step(i, X):
             A = X @ X.T
             B = b * A + c * (A @ A)
-            X = a * X + B @ X
-        return X
+            return a * X + B @ X
+
+        # fori_loop (not a Python range) so `steps` may be a traced value that
+        # varies with the training step.
+        return fori_loop(0, steps, _ns_step, X)
 
     def tall_case(g):
         X = g.T.astype(jnp.bfloat16)
@@ -397,6 +408,8 @@ def muon(
     n_warmdown_iters: int,
     n_train_iters: int,
     ns_iters: int,
+    ns_iters_min: int,
+    ns_iters_warmup_frac: float,
     eps: float,
 ):
 
@@ -412,6 +425,17 @@ def muon(
         momentum = warmup_momentum_init + frac * (
             warmup_momentum_final - warmup_momentum_init
         )
+        # Adaptive Newton-Schulz iteration count: fewer iterations early, ramping
+        # linearly up to ns_iters over the first ns_iters_warmup_frac of training.
+        if ns_iters_min >= ns_iters:
+            ns_iters_now = ns_iters
+        else:
+            ns_ramp = jnp.minimum(
+                step / jnp.maximum(1.0, n_train_iters * ns_iters_warmup_frac), 1.0
+            )
+            ns_iters_now = (
+                ns_iters_min + jnp.round(ns_ramp * (ns_iters - ns_iters_min))
+            ).astype(jnp.int32)
         new_m = tree_map(
             lambda m, g: (m + (1 - momentum).astype(m.dtype) * (g - m)).astype(m.dtype),
             state["m"],
@@ -422,7 +446,7 @@ def muon(
             g_nesterov = g + momentum.astype(m.dtype) * (m - g)
             update = (
                 lr.astype(p.dtype)
-                * zeropower_via_newtonschulz5(g_nesterov, ns_iters, eps).astype(p.dtype)
+                * zeropower_via_newtonschulz5(g_nesterov, ns_iters_now, eps).astype(p.dtype)
                 * jnp.sqrt(jnp.maximum(1.0, g.shape[0] / g.shape[1])).astype(p.dtype)
             )
             return p - update
@@ -763,6 +787,8 @@ def init_optimizer(config: Config, params: PyTree, mesh: Mesh):
         config.n_warmdown_iters,
         config.n_train_iters,
         config.muon_ns_iters,
+        config.muon_ns_iters_min,
+        config.muon_ns_iters_warmup_frac,
         config.muon_eps,
     )
 
