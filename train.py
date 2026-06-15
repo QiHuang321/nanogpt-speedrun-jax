@@ -220,6 +220,13 @@ class Config:
     val_tokens: int = 10485760
     save_every: int = 0
 
+    # Intermediate evaluation points: extra monitoring-only validation passes
+    # run at these fractions of total training, in addition to the regular
+    # val_loss_every cadence and the final eval. Read-only — they never touch
+    # params/opt_state and never trigger early stop, so the training path
+    # (parameter/optimizer trajectory and termination) is unchanged.
+    intermediate_eval_fracs: tuple[float, ...] = (0.25, 0.5, 0.75)
+
     # Speedrun track configuration:
     #   - main track (default): run for n_train_iters steps, report final val_loss.
     #   - optimization track: stop as soon as val_loss <= target_val_loss is hit
@@ -993,6 +1000,14 @@ def train_loop(config: Config):
         val_batches = load_dataset(val_config, logger, mesh, is_training=False)
         logger.msg(f"Loaded {len(val_batches)} validation batches for this process.")
 
+        # Monitoring-only intermediate evaluation points (see Config.
+        # intermediate_eval_fracs). These run extra read-only validation passes
+        # between the regular val_loss_every points; they never early-stop and
+        # never modify params/opt_state, so the training path is unchanged.
+        intermediate_eval_steps = {
+            int(f * config.n_train_iters) for f in config.intermediate_eval_fracs
+        }
+
         logger.msg("Starting training...")
         last_step_time = time.time()
         for step in range(config.n_train_iters):
@@ -1053,6 +1068,23 @@ def train_loop(config: Config):
                     })
                     target_reached_step = step
                     break
+            elif step > 0 and step in intermediate_eval_steps:
+                # Intermediate monitoring evaluation: logs val_loss between the
+                # regular val_loss_every points for a finer-grained loss curve.
+                # Read-only and never triggers early stop, so the training path
+                # (params/opt_state trajectory) is unchanged. The `elif` ensures
+                # we don't double-evaluate when an intermediate step happens to
+                # coincide with a regular val step.
+                run_evaluation(
+                    step,
+                    config,
+                    params,
+                    iter(val_batches),
+                    precomputed_params,
+                    mesh,
+                    logger,
+                    compiled_eval_fn,
+                )
             if config.save_every > 0 and step > 0 and (step % config.save_every == 0):
                 logger.dump(step, params, opt_state, config)
         logger.flush()
