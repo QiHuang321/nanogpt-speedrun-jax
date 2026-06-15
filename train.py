@@ -233,6 +233,13 @@ class Config:
     f_warmdown_iters: float = 0.4
     n_warmdown_iters: int = 0
     val_loss_every: int = 125
+    # Extra, opt-in "intermediate" evaluation points: explicit training-step
+    # indices at which to additionally run validation, on top of the periodic
+    # val_loss_every schedule. Purely observational — evaluation reads params
+    # without mutating them, so the training trajectory is identical whether or
+    # not these are set. Empty by default so the speedrun wall-clock and the
+    # optimization-track result are unchanged unless explicitly enabled.
+    intermediate_val_steps: tuple[int, ...] = ()
     val_tokens: int = 10485760
     save_every: int = 0
 
@@ -1054,7 +1061,13 @@ def train_loop(config: Config):
             }
             logger.log(log_payload)
             target_reached_step = None
-            if step > 0 and (step % config.val_loss_every == 0):
+            # Periodic schedule plus any opt-in intermediate eval points. Both
+            # only read params (no update), so adding intermediate points does
+            # not change the training path; with the default empty tuple this
+            # condition reduces exactly to the original periodic check.
+            is_periodic_val = step > 0 and (step % config.val_loss_every == 0)
+            is_intermediate_val = step in config.intermediate_val_steps
+            if is_periodic_val or is_intermediate_val:
                 val_loss = run_evaluation(
                     step,
                     config,
@@ -1065,8 +1078,12 @@ def train_loop(config: Config):
                     logger,
                     compiled_eval_fn,
                 )
+                # Early stop follows the periodic schedule only, so the
+                # optimization-track result is independent of intermediate
+                # (diagnostic) eval points.
                 if (
-                    config.early_stop_on_target
+                    is_periodic_val
+                    and config.early_stop_on_target
                     and val_loss is not None
                     and val_loss <= config.target_val_loss
                 ):
