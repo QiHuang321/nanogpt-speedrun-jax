@@ -5,6 +5,7 @@ import time
 import uuid
 import dataclasses
 import datetime
+import json
 
 import jax
 # NOTE: do NOT call jax.distributed.initialize() — Cloud TPU auto-initializes
@@ -170,6 +171,33 @@ class Logger:
             pickle.dump(state_to_save, f)
 
         self.msg(f"Saved checkpoint to {save_path}")
+
+
+class GradNormDiagnostic:
+    """Diagnostic-only hook: appends the global gradient L2 norm for each step
+    to a separate JSON-lines file. This is purely observational — the optimizer
+    still receives the exact same gradients, so it has no effect on training.
+    Only the master process writes, and the file lives outside logs/ and
+    records/ so it never collides with the run log or the speedrun records."""
+
+    def __init__(self, logger: Logger):
+        self.is_master = logger.is_master
+        self.path = None
+        if not self.is_master:
+            return
+        run_id = logger.run_id or "no_run_id"
+        self.path = f"grad_norm_diagnostics_{run_id}.jsonl"
+        # Start fresh so a re-used run id doesn't append onto a stale file.
+        with open(self.path, "w"):
+            pass
+
+    def record(self, step: int, grad_norm: float):
+        if not self.is_master or self.path is None:
+            return
+        with open(self.path, "a") as f:
+            f.write(
+                json.dumps({"step": int(step), "grad_norm": float(grad_norm)}) + "\n"
+            )
 
 
 def filter_pytree(pytree: PyTree, condition_map: Any) -> PyTree | None:
@@ -920,8 +948,18 @@ def train_step(
     final_grads = tree_map(
         lambda g: (g / n_grad_acc_steps).astype(g.dtype), final_grads_accum
     )
+    # Diagnostic only: global gradient L2 norm, accumulated in fp32 for
+    # stability. It is reported alongside the loss but is NOT fed back into the
+    # update below, so the optimizer sees identical grads and training dynamics
+    # are unchanged.
+    grad_norm = jnp.sqrt(
+        sum(
+            jnp.sum(jnp.square(g.astype(jnp.float32)))
+            for g in tree_leaves(final_grads)
+        )
+    )
     new_params, new_opt_state = optimizer.update(final_grads, params, opt_state)
-    return new_params, new_opt_state, {"loss": avg_loss}
+    return new_params, new_opt_state, {"loss": avg_loss, "grad_norm": grad_norm}
 
 
 def eval_step(
@@ -978,6 +1016,7 @@ def run_evaluation(
 
 def train_loop(config: Config):
     logger = Logger()
+    grad_diagnostic = GradNormDiagnostic(logger)
     mesh = get_mesh(config)
 
     with mesh:
@@ -1025,6 +1064,13 @@ def train_loop(config: Config):
             # Read loss from local addressable shard (replicated scalar; no
             # cross-host gather). Forces a host sync, which also paces the loop.
             loss_val = float(np.asarray(metrics["loss"].addressable_data(0)))
+            # Diagnostic-only side channel: stream the global grad norm to its
+            # own JSON file (master-only). Does not affect training or the
+            # existing log payload below.
+            grad_norm_val = float(
+                np.asarray(metrics["grad_norm"].addressable_data(0))
+            )
+            grad_diagnostic.record(step, grad_norm_val)
             now = time.time()
             step_secs = now - last_step_time
             last_step_time = now
