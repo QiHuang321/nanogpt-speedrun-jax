@@ -217,6 +217,11 @@ class Config:
     f_warmdown_iters: float = 0.2  # warmup-stable-decay: fraction of steps in the final linear decay
     n_warmdown_iters: int = 0
     val_loss_every: int = 125
+    # Extra diagnostic evaluation points: absolute step indices at which to run
+    # validation in addition to the regular val_loss_every cadence. Evaluation
+    # only reads params (no RNG / param / opt-state / data-iterator mutation), so
+    # these never change the training path. Empty by default -> identical runs.
+    eval_at_steps: tuple[int, ...] = ()
     val_tokens: int = 10485760
     save_every: int = 0
 
@@ -1030,7 +1035,12 @@ def train_loop(config: Config):
             }
             logger.log(log_payload)
             target_reached_step = None
-            if step > 0 and (step % config.val_loss_every == 0):
+            # Run validation on the regular cadence and at any extra intermediate
+            # evaluation points; both paths are read-only and leave the training
+            # state (params, opt_state, RNG, loaders) untouched.
+            if step > 0 and (
+                step % config.val_loss_every == 0 or step in config.eval_at_steps
+            ):
                 val_loss = run_evaluation(
                     step,
                     config,
