@@ -219,6 +219,11 @@ class Config:
     val_loss_every: int = 125
     val_tokens: int = 10485760
     save_every: int = 0
+    # Intermediate evaluation: in addition to the regular val_loss_every
+    # cadence, also run validation at these fractions of total training. These
+    # are read-only measurement points — they do not change the training path
+    # or the early-stop schedule (which still keys off val_loss_every).
+    intermediate_eval_fracs: tuple[float, ...] = (0.25, 0.5, 0.75)
 
     # Speedrun track configuration:
     #   - main track (default): run for n_train_iters steps, report final val_loss.
@@ -1009,6 +1014,15 @@ def train_loop(config: Config):
         logger.msg(f"Loaded {len(val_batches)} validation batches for this process.")
 
         logger.msg("Starting training...")
+        # Pre-compute intermediate evaluation steps (read-only measurement
+        # points added on top of the regular val_loss_every cadence). Step 0 is
+        # excluded; overlaps with the regular cadence collapse to a single eval
+        # via the unified block below.
+        intermediate_eval_steps = {
+            int(frac * config.n_train_iters)
+            for frac in config.intermediate_eval_fracs
+        }
+        intermediate_eval_steps.discard(0)
         last_step_time = time.time()
         for step in range(config.n_train_iters):
             batched_x, batched_y = next(train_loader)
@@ -1040,7 +1054,9 @@ def train_loop(config: Config):
             }
             logger.log(log_payload)
             target_reached_step = None
-            if step > 0 and (step % config.val_loss_every == 0):
+            is_regular_eval = step > 0 and (step % config.val_loss_every == 0)
+            is_intermediate_eval = step > 0 and (step in intermediate_eval_steps)
+            if is_regular_eval or is_intermediate_eval:
                 val_loss = run_evaluation(
                     step,
                     config,
@@ -1052,7 +1068,8 @@ def train_loop(config: Config):
                     compiled_eval_fn,
                 )
                 if (
-                    config.early_stop_on_target
+                    is_regular_eval
+                    and config.early_stop_on_target
                     and val_loss is not None
                     and val_loss <= config.target_val_loss
                 ):
