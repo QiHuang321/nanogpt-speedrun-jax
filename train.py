@@ -220,6 +220,15 @@ class Config:
     val_tokens: int = 10485760
     save_every: int = 0
 
+    # Intermediate evaluation points: extra val_loss measurements taken at these
+    # fractions of the run, in addition to the regular val_loss_every cadence.
+    # Purely observational — they do not change the training path (params,
+    # optimizer state, data consumption, and early-stop are all unaffected).
+    # Concrete step indices are derived in __post_init__ as
+    # `intermediate_eval_steps`.
+    intermediate_eval_fracs: tuple[float, ...] = (0.25, 0.5, 0.75)
+    intermediate_eval_steps: tuple[int, ...] = ()
+
     # Speedrun track configuration:
     #   - main track (default): run for n_train_iters steps, report final val_loss.
     #   - optimization track: stop as soon as val_loss <= target_val_loss is hit
@@ -289,6 +298,23 @@ class Config:
         assert self.d_model % self.n_heads == 0
         object.__setattr__(self, "d_head", self.d_model // self.n_heads)
         assert self.n_layers % 2 == 0
+
+        # Derive concrete intermediate evaluation step indices from the
+        # configured fractions. Drop step 0 and any that already land on the
+        # regular val_loss_every cadence so no step is evaluated twice.
+        inter = sorted(
+            {
+                int(self.n_train_iters * f)
+                for f in self.intermediate_eval_fracs
+                if 0.0 < f < 1.0
+            }
+        )
+        inter = tuple(
+            s
+            for s in inter
+            if s > 0 and (self.val_loss_every <= 0 or s % self.val_loss_every != 0)
+        )
+        object.__setattr__(self, "intermediate_eval_steps", inter)
 
 
 def get_mesh(config: Config):
@@ -1052,6 +1078,20 @@ def train_loop(config: Config):
                     })
                     target_reached_step = step
                     break
+            elif step in config.intermediate_eval_steps:
+                # Intermediate evaluation point: observational only. We log
+                # val_loss to get a finer-grained curve but deliberately skip the
+                # early-stop check so the training path stays identical.
+                run_evaluation(
+                    step,
+                    config,
+                    params,
+                    iter(val_batches),
+                    precomputed_params,
+                    mesh,
+                    logger,
+                    compiled_eval_fn,
+                )
             if config.save_every > 0 and step > 0 and (step % config.save_every == 0):
                 logger.dump(step, params, opt_state, config)
         logger.flush()
