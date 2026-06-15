@@ -217,6 +217,14 @@ class Config:
     f_warmdown_iters: float = 0.4
     n_warmdown_iters: int = 0
     val_loss_every: int = 125
+    # Extra observational evaluation points, expressed as fractions of training
+    # progress in (0, 1). These trigger an additional validation on top of the
+    # regular every-`val_loss_every` cadence. Evaluation never mutates params or
+    # opt_state, so adding points here does not change the training path — it
+    # only logs val_loss at finer-grained intermediate steps. Resolved to
+    # concrete step indices in __post_init__ (see intermediate_eval_steps).
+    intermediate_eval_fracs: tuple[float, ...] = (0.05, 0.1, 0.25, 0.5, 0.75)
+    intermediate_eval_steps: tuple[int, ...] = ()
     val_tokens: int = 10485760
     save_every: int = 0
 
@@ -289,6 +297,24 @@ class Config:
         assert self.d_model % self.n_heads == 0
         object.__setattr__(self, "d_head", self.d_model // self.n_heads)
         assert self.n_layers % 2 == 0
+        # Resolve fractional intermediate-eval points to concrete step indices
+        # (deduplicated, sorted, strictly inside (0, n_train_iters)). These add
+        # extra validation logging only; they do not affect the trajectory.
+        object.__setattr__(
+            self,
+            "intermediate_eval_steps",
+            tuple(
+                sorted(
+                    s
+                    for s in {
+                        int(round(f * self.n_train_iters))
+                        for f in self.intermediate_eval_fracs
+                        if 0.0 < f < 1.0
+                    }
+                    if 0 < s < self.n_train_iters
+                )
+            ),
+        )
 
 
 def get_mesh(config: Config):
@@ -1024,7 +1050,10 @@ def train_loop(config: Config):
             }
             logger.log(log_payload)
             target_reached_step = None
-            if step > 0 and (step % config.val_loss_every == 0):
+            if step > 0 and (
+                step % config.val_loss_every == 0
+                or step in config.intermediate_eval_steps
+            ):
                 val_loss = run_evaluation(
                     step,
                     config,
