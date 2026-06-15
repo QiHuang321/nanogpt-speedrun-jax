@@ -349,13 +349,20 @@ class Optimizer(NamedTuple):
 
 
 def get_lr(it, n_warmup_iters, n_warmdown_iters, n_train_iters):
-    warmup_lr = (it + 1) / n_warmup_iters
-    constant_lr = 1.0
-    warmdown_lr = (n_train_iters - it) / n_warmdown_iters * (1.0 - 0.1) + 0.1
+    # Warmup-stable-decay (trapezoid) schedule, normalized so the stable phase
+    # sits at 1.0 (the peak; per-group peak LR = base_lr * 1.0, unchanged).
+    #   * warmup: linear ramp 0 -> 1 over the first n_warmup_iters steps
+    #   * stable: held flat at the peak through the middle
+    #   * decay:  linear ramp 1 -> 0 over the final n_warmdown_iters steps
+    # jnp.maximum(..., 1) guards the degenerate divisor when a phase is empty
+    # (e.g. n_warmup_iters == 0); that branch is masked out by jnp.where anyway.
+    warmup_lr = (it + 1) / jnp.maximum(n_warmup_iters, 1)
+    stable_lr = 1.0
+    decay_lr = (n_train_iters - it) / jnp.maximum(n_warmdown_iters, 1)
     lr = jnp.where(
         it < n_warmup_iters,
         warmup_lr,
-        jnp.where(it < n_train_iters - n_warmdown_iters, constant_lr, warmdown_lr),
+        jnp.where(it < n_train_iters - n_warmdown_iters, stable_lr, decay_lr),
     )
     return lr
 
