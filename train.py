@@ -213,8 +213,8 @@ class Config:
 
     # iteration handling
     n_train_iters: int = 1675
-    n_warmup_iters: int = 0
-    f_warmdown_iters: float = 0.0  # handicap
+    n_warmup_iters: int = 50  # WSD trapezoid: linear warmup steps
+    f_warmdown_iters: float = 0.2  # WSD trapezoid: linear decay fraction
     n_warmdown_iters: int = 0
     val_loss_every: int = 125
     val_tokens: int = 10485760
@@ -314,7 +314,7 @@ class Optimizer(NamedTuple):
 def get_lr(it, n_warmup_iters, n_warmdown_iters, n_train_iters):
     warmup_lr = (it + 1) / n_warmup_iters
     constant_lr = 1.0
-    warmdown_lr = (n_train_iters - it) / n_warmdown_iters * (1.0 - 0.1) + 0.1
+    warmdown_lr = (n_train_iters - it) / n_warmdown_iters
     lr = jnp.where(
         it < n_warmup_iters,
         warmup_lr,
