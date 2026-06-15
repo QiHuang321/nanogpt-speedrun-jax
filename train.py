@@ -36,6 +36,7 @@ from jax.nn import dot_product_attention
 import einops
 
 import pickle
+import json
 
 import numpy as np
 
@@ -228,6 +229,15 @@ class Config:
     # `intermediate_eval_steps`.
     intermediate_eval_fracs: tuple[float, ...] = (0.25, 0.5, 0.75)
     intermediate_eval_steps: tuple[int, ...] = ()
+
+    # Gradient-norm diagnostic: the per-step global L2 norm of the gradient that
+    # is applied each step is written to a separate JSON file for offline
+    # inspection. Purely observational — it does not change params, optimizer
+    # state, data consumption, or early-stop, so the training path is
+    # unaffected. The file is run-namespaced at write time and lives outside
+    # logs/ and records/. Set grad_norm_log_every <= 0 to disable.
+    grad_norm_log_file: str = "grad_norms.json"
+    grad_norm_log_every: int = 1
 
     # Speedrun track configuration:
     #   - main track (default): run for n_train_iters steps, report final val_loss.
@@ -931,8 +941,18 @@ def train_step(
     final_grads = tree_map(
         lambda g: (g / n_grad_acc_steps).astype(g.dtype), final_grads_accum
     )
+    # Gradient-norm diagnostic (observational only): global L2 norm of the
+    # gradient that is about to be applied, accumulated in float32 for accuracy.
+    # This is a read-only reduction over final_grads returned as an extra metric;
+    # it is NOT fed back into the update, so params/opt_state/data are unchanged.
+    grad_norm = jnp.sqrt(
+        sum(
+            jnp.sum(jnp.square(g.astype(jnp.float32)))
+            for g in tree_leaves(final_grads)
+        )
+    )
     new_params, new_opt_state = optimizer.update(final_grads, params, opt_state)
-    return new_params, new_opt_state, {"loss": avg_loss}
+    return new_params, new_opt_state, {"loss": avg_loss, "grad_norm": grad_norm}
 
 
 def eval_step(
@@ -1019,6 +1039,15 @@ def train_loop(config: Config):
         logger.msg(f"Loaded {len(val_batches)} validation batches for this process.")
 
         logger.msg("Starting training...")
+        # Gradient-norm diagnostic output: a separate JSON file (deliberately not
+        # under logs/ or records/) that accumulates the per-step global grad
+        # norm. Master-only and observational — it does not affect training.
+        grad_norm_records = []
+        grad_norm_path = None
+        if logger.is_master and config.grad_norm_log_every > 0:
+            base, ext = os.path.splitext(config.grad_norm_log_file)
+            grad_norm_path = f"{base}_{logger.run_id}{ext}"
+            logger.msg(f"Writing gradient-norm diagnostics to {grad_norm_path}")
         last_step_time = time.time()
         for step in range(config.n_train_iters):
             batched_x, batched_y = next(train_loader)
@@ -1049,6 +1078,15 @@ def train_loop(config: Config):
                 "batch_size": batch_size,
             }
             logger.log(log_payload)
+            if grad_norm_path is not None and step % config.grad_norm_log_every == 0:
+                # Pull the replicated scalar from the local shard and append it,
+                # rewriting the JSON file so partial runs leave a valid file.
+                grad_norm_val = float(
+                    np.asarray(metrics["grad_norm"].addressable_data(0))
+                )
+                grad_norm_records.append({"step": step, "grad_norm": grad_norm_val})
+                with open(grad_norm_path, "w") as f:
+                    json.dump(grad_norm_records, f)
             target_reached_step = None
             if step > 0 and (step % config.val_loss_every == 0):
                 val_loss = run_evaluation(
