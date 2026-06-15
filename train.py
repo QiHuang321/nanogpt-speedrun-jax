@@ -3,6 +3,7 @@ import sys
 import glob
 import time
 import uuid
+import json
 import dataclasses
 import datetime
 
@@ -906,7 +907,14 @@ def train_step(
         lambda g: (g / n_grad_acc_steps).astype(g.dtype), final_grads_accum
     )
     new_params, new_opt_state = optimizer.update(final_grads, params, opt_state)
-    return new_params, new_opt_state, {"loss": avg_loss}
+    # Diagnostic only: global L2 norm of the (micro-batch-averaged) gradients,
+    # computed in float32 to avoid bf16 over/underflow. This reads the same
+    # grads passed to optimizer.update above and never feeds back into the
+    # update, so training dynamics are unchanged.
+    grad_norm = jnp.sqrt(
+        sum(jnp.sum(jnp.square(g.astype(jnp.float32))) for g in tree_leaves(final_grads))
+    )
+    return new_params, new_opt_state, {"loss": avg_loss, "grad_norm": grad_norm}
 
 
 def eval_step(
@@ -992,6 +1000,21 @@ def train_loop(config: Config):
         val_batches = load_dataset(val_config, logger, mesh, is_training=False)
         logger.msg(f"Loaded {len(val_batches)} validation batches for this process.")
 
+        # Gradient-norm diagnostic hook: accumulate the per-step global grad
+        # norm (computed in train_step) and persist it to a separate JSON file,
+        # distinct from the text/wandb logs. Purely diagnostic — it reads the
+        # value train_step already returns and never feeds back into training.
+        grad_norm_records = []
+        grad_norm_path = (
+            f"grad_norm_{logger.run_id}.json" if logger.is_master else None
+        )
+
+        def _write_grad_norms():
+            if grad_norm_path is None:
+                return
+            with open(grad_norm_path, "w") as f:
+                json.dump(grad_norm_records, f)
+
         logger.msg("Starting training...")
         last_step_time = time.time()
         for step in range(config.n_train_iters):
@@ -1010,6 +1033,16 @@ def train_loop(config: Config):
             # Read loss from local addressable shard (replicated scalar; no
             # cross-host gather). Forces a host sync, which also paces the loop.
             loss_val = float(np.asarray(metrics["loss"].addressable_data(0)))
+            # Gradient-norm diagnostic (read-only; does not affect training).
+            if logger.is_master:
+                grad_norm_val = float(
+                    np.asarray(metrics["grad_norm"].addressable_data(0))
+                )
+                grad_norm_records.append(
+                    {"step": step, "grad_norm": grad_norm_val, "loss": loss_val}
+                )
+                if step % config.val_loss_every == 0:
+                    _write_grad_norms()
             now = time.time()
             step_secs = now - last_step_time
             last_step_time = now
@@ -1068,6 +1101,9 @@ def train_loop(config: Config):
         )
         logger.flush()
         logger.msg("Training finished.")
+        _write_grad_norms()
+        if grad_norm_path is not None:
+            logger.msg(f"Wrote gradient-norm diagnostics to {grad_norm_path}")
         logger.dump(step, params, opt_state, config)
 
 
