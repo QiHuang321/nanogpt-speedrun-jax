@@ -36,6 +36,7 @@ from jax.nn import dot_product_attention
 import einops
 
 import pickle
+import json
 
 import numpy as np
 
@@ -170,6 +171,39 @@ class Logger:
             pickle.dump(state_to_save, f)
 
         self.msg(f"Saved checkpoint to {save_path}")
+
+
+class GradNormDiagnostic:
+    """Records per-step global gradient L2 norms to a separate JSON file.
+
+    Purely observational: train_step surfaces the grad norm alongside the loss,
+    computed from the same averaged gradients the optimizer already consumes, so
+    enabling this changes no training math. Kept out of the main Logger so the
+    diagnostic lands in its own file. Master process only; writes go to
+    diagnostics/ (never logs/ or records/).
+    """
+
+    def __init__(self, run_id):
+        self.is_master = jax.process_index() == 0
+        self.records = []
+        self.path = None
+        if not self.is_master or run_id is None:
+            return
+        os.makedirs("diagnostics", exist_ok=True)
+        self.path = f"diagnostics/grad_norms_{run_id}.json"
+
+    def record(self, step: int, grad_norm: float, loss: float):
+        if self.path is None:
+            return
+        self.records.append(
+            {"step": int(step), "grad_norm": float(grad_norm), "loss": float(loss)}
+        )
+
+    def flush(self):
+        if self.path is None:
+            return
+        with open(self.path, "w") as f:
+            json.dump(self.records, f)
 
 
 def filter_pytree(pytree: PyTree, condition_map: Any) -> PyTree | None:
@@ -933,8 +967,17 @@ def train_step(
     final_grads = tree_map(
         lambda g: (g / n_grad_acc_steps).astype(g.dtype), final_grads_accum
     )
+    # Diagnostic only: global L2 norm of the (already-averaged) gradients the
+    # optimizer consumes below. Surfaced in metrics for the grad-norm hook; it
+    # feeds nothing back into params/opt_state, so the training path is unchanged.
+    grad_norm = jnp.sqrt(
+        sum(
+            jnp.sum(jnp.square(g.astype(jnp.float32)))
+            for g in tree_leaves(final_grads)
+        )
+    )
     new_params, new_opt_state = optimizer.update(final_grads, params, opt_state)
-    return new_params, new_opt_state, {"loss": avg_loss}
+    return new_params, new_opt_state, {"loss": avg_loss, "grad_norm": grad_norm}
 
 
 def eval_step(
@@ -1021,6 +1064,7 @@ def train_loop(config: Config):
         logger.msg(f"Loaded {len(val_batches)} validation batches for this process.")
 
         logger.msg("Starting training...")
+        grad_diag = GradNormDiagnostic(logger.run_id)
         last_step_time = time.time()
         for step in range(config.n_train_iters):
             batched_x, batched_y = next(train_loader)
@@ -1038,6 +1082,8 @@ def train_loop(config: Config):
             # Read loss from local addressable shard (replicated scalar; no
             # cross-host gather). Forces a host sync, which also paces the loop.
             loss_val = float(np.asarray(metrics["loss"].addressable_data(0)))
+            grad_norm_val = float(np.asarray(metrics["grad_norm"].addressable_data(0)))
+            grad_diag.record(step, grad_norm_val, loss_val)
             now = time.time()
             step_secs = now - last_step_time
             last_step_time = now
@@ -1065,6 +1111,9 @@ def train_loop(config: Config):
                     logger,
                     compiled_eval_fn,
                 )
+                # Persist accumulated grad norms at the validation cadence so a
+                # crashed/early-stopped run still leaves a partial diagnostic.
+                grad_diag.flush()
                 # Early stopping stays gated on the regular validation cadence:
                 # intermediate eval points are observational only, so adding
                 # them never changes when (or whether) the run stops.
@@ -1089,6 +1138,7 @@ def train_loop(config: Config):
             if config.save_every > 0 and step > 0 and (step % config.save_every == 0):
                 logger.dump(step, params, opt_state, config)
         logger.flush()
+        grad_diag.flush()
         logger.msg("Final validation")
         run_evaluation(
             step,
