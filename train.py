@@ -219,6 +219,12 @@ class Config:
     val_loss_every: int = 125
     val_tokens: int = 10485760
     save_every: int = 0
+    # Intermediate evaluation points: extra validation runs at these fractions
+    # of total training, in addition to the regular val_loss_every cadence.
+    # Purely observational — eval reads params and a fresh val iterator, so it
+    # does not touch the optimizer state, training data cursor, or step compute.
+    intermediate_eval_fracs: tuple[float, ...] = (0.25, 0.5, 0.75)
+    intermediate_eval_steps: tuple[int, ...] = ()  # derived in __post_init__
 
     # Speedrun track configuration:
     #   - main track (default): run for n_train_iters steps, report final val_loss.
@@ -285,6 +291,22 @@ class Config:
 
         object.__setattr__(
             self, "n_warmdown_iters", int(self.n_train_iters * self.f_warmdown_iters)
+        )
+        # Resolve intermediate eval fractions to concrete (deduplicated, sorted)
+        # step indices strictly inside the run; coincident regular-cadence steps
+        # are handled at the call site so we never double-evaluate.
+        object.__setattr__(
+            self,
+            "intermediate_eval_steps",
+            tuple(
+                sorted(
+                    {
+                        int(round(f * self.n_train_iters))
+                        for f in self.intermediate_eval_fracs
+                        if 0.0 < f < 1.0
+                    }
+                )
+            ),
         )
         assert self.d_model % self.n_heads == 0
         object.__setattr__(self, "d_head", self.d_model // self.n_heads)
@@ -1030,7 +1052,9 @@ def train_loop(config: Config):
             }
             logger.log(log_payload)
             target_reached_step = None
-            if step > 0 and (step % config.val_loss_every == 0):
+            is_regular_eval = step % config.val_loss_every == 0
+            is_intermediate_eval = step in config.intermediate_eval_steps
+            if step > 0 and (is_regular_eval or is_intermediate_eval):
                 val_loss = run_evaluation(
                     step,
                     config,
@@ -1041,8 +1065,12 @@ def train_loop(config: Config):
                     logger,
                     compiled_eval_fn,
                 )
+                # Early stopping stays gated on the regular validation cadence:
+                # intermediate eval points are observational only, so adding
+                # them never changes when (or whether) the run stops.
                 if (
-                    config.early_stop_on_target
+                    is_regular_eval
+                    and config.early_stop_on_target
                     and val_loss is not None
                     and val_loss <= config.target_val_loss
                 ):
