@@ -217,6 +217,11 @@ class Config:
     f_warmdown_iters: float = 0.0  # handicap
     n_warmdown_iters: int = 0
     val_loss_every: int = 125
+    # Intermediate evaluation points: explicit step indices at which to run an
+    # extra validation pass (e.g. for learning-curve snapshots). These only add
+    # observational eval passes and never affect the training path. Empty by
+    # default, so the default validation cadence is unchanged.
+    eval_points: tuple[int, ...] = ()
     val_tokens: int = 10485760
     save_every: int = 0
 
@@ -1053,6 +1058,23 @@ def train_loop(config: Config):
                     })
                     target_reached_step = step
                     break
+            elif step in config.eval_points:
+                # Intermediate evaluation point: run an extra validation pass at
+                # an explicitly requested step (e.g. a learning-curve snapshot).
+                # Purely observational — it reads params only and does not touch
+                # the optimizer, data, or control flow (no early stop), so the
+                # training path is unchanged. The elif skips any step already
+                # covered by the val_loss_every cadence above.
+                run_evaluation(
+                    step,
+                    config,
+                    params,
+                    iter(val_batches),
+                    precomputed_params,
+                    mesh,
+                    logger,
+                    compiled_eval_fn,
+                )
             if config.save_every > 0 and step > 0 and (step % config.save_every == 0):
                 logger.dump(step, params, opt_state, config)
         logger.flush()
