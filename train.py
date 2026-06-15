@@ -219,6 +219,13 @@ class Config:
     val_loss_every: int = 125
     val_tokens: int = 10485760
     save_every: int = 0
+    # Intermediate evaluation points: explicit step indices at which to run an
+    # additional, observability-only validation pass, on top of the regular
+    # every-val_loss_every schedule. These never trigger early stop or
+    # checkpointing and never touch params/opt_state/data, so the training path
+    # is identical with or without them. Tuple (hashable) for the static Config.
+    # Empty by default (no-op).
+    intermediate_eval_steps: tuple[int, ...] = ()
 
     # Speedrun track configuration:
     #   - main track (default): run for n_train_iters steps, report final val_loss.
@@ -1052,6 +1059,21 @@ def train_loop(config: Config):
                     })
                     target_reached_step = step
                     break
+            elif step in config.intermediate_eval_steps:
+                # Intermediate evaluation point: observability-only validation
+                # at an explicitly requested step (uses a fresh val iterator,
+                # leaves params/opt_state untouched, and never early-stops or
+                # checkpoints), so the training path is unchanged.
+                run_evaluation(
+                    step,
+                    config,
+                    params,
+                    iter(val_batches),
+                    precomputed_params,
+                    mesh,
+                    logger,
+                    compiled_eval_fn,
+                )
             if config.save_every > 0 and step > 0 and (step % config.save_every == 0):
                 logger.dump(step, params, opt_state, config)
         logger.flush()
