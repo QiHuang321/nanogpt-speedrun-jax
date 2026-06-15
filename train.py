@@ -219,6 +219,12 @@ class Config:
     val_loss_every: int = 125
     val_tokens: int = 10485760
     save_every: int = 0
+    # Intermediate evaluation points: extra, logging-only validation runs at
+    # these fractions of the total training run, evaluated IN ADDITION to the
+    # val_loss_every schedule. They never touch params, optimizer state, the
+    # training data stream, RNG, or the early-stop decision (i.e. no
+    # training-path change) — they only emit extra val_loss readings.
+    eval_fractions: tuple[float, ...] = (0.25, 0.5, 0.75)
 
     # Speedrun track configuration:
     #   - main track (default): run for n_train_iters steps, report final val_loss.
@@ -993,6 +999,13 @@ def train_loop(config: Config):
         logger.msg(f"Loaded {len(val_batches)} validation batches for this process.")
 
         logger.msg("Starting training...")
+        # Concrete step indices for the intermediate (logging-only) evaluation
+        # points; deduped against the regular schedule inside the loop.
+        intermediate_eval_steps = {
+            s
+            for f in config.eval_fractions
+            if 0.0 < f < 1.0 and (s := int(f * config.n_train_iters)) > 0
+        }
         last_step_time = time.time()
         for step in range(config.n_train_iters):
             batched_x, batched_y = next(train_loader)
@@ -1024,7 +1037,14 @@ def train_loop(config: Config):
             }
             logger.log(log_payload)
             target_reached_step = None
-            if step > 0 and (step % config.val_loss_every == 0):
+            is_val_step = step > 0 and (step % config.val_loss_every == 0)
+            # Intermediate points fire only when this isn't already a scheduled
+            # val step, and are logging-only (they never trigger early stop), so
+            # the decision of when/whether to break stays on the regular schedule.
+            is_intermediate_step = (
+                step in intermediate_eval_steps and not is_val_step
+            )
+            if is_val_step or is_intermediate_step:
                 val_loss = run_evaluation(
                     step,
                     config,
@@ -1036,7 +1056,8 @@ def train_loop(config: Config):
                     compiled_eval_fn,
                 )
                 if (
-                    config.early_stop_on_target
+                    is_val_step
+                    and config.early_stop_on_target
                     and val_loss is not None
                     and val_loss <= config.target_val_loss
                 ):
