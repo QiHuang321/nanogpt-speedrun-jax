@@ -218,6 +218,14 @@ class Config:
     f_warmdown_iters: float = 0.4
     n_warmdown_iters: int = 0
     val_loss_every: int = 125
+    # Intermediate (diagnostic-only) evaluation points: extra steps at which to
+    # run validation for finer-grained visibility into the (fast-moving) early
+    # loss curve, on top of the regular val_loss_every cadence. These are purely
+    # observational — they read params only, never trigger early stop, and never
+    # mutate params/opt_state/data-iterator/RNG — so the training path is
+    # identical with or without them. Steps that already land on the
+    # val_loss_every cadence are skipped to avoid double evaluation.
+    intermediate_val_steps: tuple[int, ...] = (25, 50, 75, 100)
     val_tokens: int = 10485760
     save_every: int = 0
 
@@ -1067,7 +1075,15 @@ def train_loop(config: Config):
                     with open(grad_norm_path, "w") as f:
                         json.dump(grad_norm_records, f)
             target_reached_step = None
-            if step > 0 and (step % config.val_loss_every == 0):
+            is_regular_val = step > 0 and (step % config.val_loss_every == 0)
+            # Intermediate eval points fire only when they don't already coincide
+            # with the regular cadence (no double evaluation).
+            is_intermediate_val = (
+                step > 0
+                and step in config.intermediate_val_steps
+                and not is_regular_val
+            )
+            if is_regular_val or is_intermediate_val:
                 val_loss = run_evaluation(
                     step,
                     config,
@@ -1078,8 +1094,12 @@ def train_loop(config: Config):
                     logger,
                     compiled_eval_fn,
                 )
+                # Early stop stays tied ONLY to the regular (scheduled) cadence;
+                # intermediate eval points are diagnostic and never change
+                # whether/when training stops, so the training path is unaffected.
                 if (
-                    config.early_stop_on_target
+                    is_regular_val
+                    and config.early_stop_on_target
                     and val_loss is not None
                     and val_loss <= config.target_val_loss
                 ):
