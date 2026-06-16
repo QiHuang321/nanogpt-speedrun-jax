@@ -214,7 +214,7 @@ class Config:
     # iteration handling
     n_train_iters: int = 1675
     n_warmup_iters: int = 0
-    f_warmdown_iters: float = 0.4
+    f_warmdown_iters: float = 0.0  # handicap
     n_warmdown_iters: int = 0
     val_loss_every: int = 125
     val_tokens: int = 10485760
@@ -271,7 +271,7 @@ class Config:
     n_heads: int = 4
     d_head: int = 0
     logit_softcap: float = 15.0
-    rope_base: float = 1024
+    rope_base: float = 10000  # handicap
     vocab_size: int = 50304
     dtype: str = "bfloat16"
 
