@@ -30,7 +30,7 @@ from jax.tree_util import (
     DictKey,
 )
 from jax.sharding import PartitionSpec as P, Mesh, NamedSharding, AxisType
-from jax.nn import initializers, relu, log_softmax
+from jax.nn import initializers, gelu, log_softmax
 from jax.nn import dot_product_attention
 
 import einops
@@ -825,7 +825,7 @@ def attention_forward(params, x, v1, cos, sin, config):
 
 def mlp_forward(params, x):
     x = linear(x, params["c_fc"])
-    x = relu(x) ** 2
+    x = gelu(x)
     x = linear(x, params["c_proj"])
     return x
 
