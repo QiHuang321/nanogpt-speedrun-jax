@@ -234,6 +234,11 @@ class Config:
     n_warmdown_iters: int = 0
     val_loss_every: int = 125
     val_tokens: int = 10485760
+    # Extra, purely-observational evaluation points expressed as fractions of
+    # the run (in addition to the val_loss_every schedule and the final eval).
+    # These only log val_loss; they never alter params/opt_state or trigger
+    # early stop, so the training path is left unchanged.
+    intermediate_eval_fracs: tuple[float, ...] = (0.25, 0.5, 0.75)
     save_every: int = 0
 
     # Speedrun track configuration:
@@ -1017,6 +1022,16 @@ def train_loop(config: Config):
         val_batches = load_dataset(val_config, logger, mesh, is_training=False)
         logger.msg(f"Loaded {len(val_batches)} validation batches for this process.")
 
+        # Precompute extra intermediate evaluation steps (observational only).
+        # Restricted to strictly inside (0, n_train_iters) so we never duplicate
+        # the final eval or evaluate at step 0; steps that coincide with the
+        # regular val_loss_every schedule are handled there (see the elif below).
+        intermediate_eval_steps = {
+            int(frac * config.n_train_iters)
+            for frac in config.intermediate_eval_fracs
+            if 0.0 < frac < 1.0
+        }
+
         logger.msg("Starting training...")
         last_step_time = time.time()
         for step in range(config.n_train_iters):
@@ -1084,6 +1099,21 @@ def train_loop(config: Config):
                     })
                     target_reached_step = step
                     break
+            elif step > 0 and step in intermediate_eval_steps:
+                # Intermediate, purely observational evaluation: logs one extra
+                # val_loss sample point without mutating training state or
+                # stopping early. The elif also prevents a double eval when an
+                # intermediate step coincides with the val_loss_every schedule.
+                run_evaluation(
+                    step,
+                    config,
+                    params,
+                    iter(val_batches),
+                    precomputed_params,
+                    mesh,
+                    logger,
+                    compiled_eval_fn,
+                )
             if config.save_every > 0 and step > 0 and (step % config.save_every == 0):
                 logger.dump(step, params, opt_state, config)
         logger.flush()
