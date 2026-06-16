@@ -5,6 +5,7 @@ import time
 import uuid
 import dataclasses
 import datetime
+import json
 
 import jax
 # NOTE: do NOT call jax.distributed.initialize() — Cloud TPU auto-initializes
@@ -909,8 +910,14 @@ def train_step(
     final_grads = tree_map(
         lambda g: (g / n_grad_acc_steps).astype(g.dtype), final_grads_accum
     )
+    # Diagnostic only: global L2 norm of the gradients actually handed to the
+    # optimizer. Computed from final_grads but never fed back into the update,
+    # so it has no effect on training.
+    grad_norm = jnp.sqrt(
+        sum(jnp.sum(jnp.square(g.astype(jnp.float32))) for g in tree_leaves(final_grads))
+    )
     new_params, new_opt_state = optimizer.update(final_grads, params, opt_state)
-    return new_params, new_opt_state, {"loss": avg_loss}
+    return new_params, new_opt_state, {"loss": avg_loss, "grad_norm": grad_norm}
 
 
 def eval_step(
@@ -965,6 +972,19 @@ def run_evaluation(
     return final_val_loss
 
 
+def _write_grad_norm_diagnostics(path: str, records: list):
+    """Diagnostic-only: dump per-step gradient norms to a standalone JSON file.
+
+    Written atomically and kept separate from the main logs/ output and from the
+    optimizer, so it has no effect on training — it just records the global
+    gradient L2 norm observed at each step.
+    """
+    tmp_path = path + ".tmp"
+    with open(tmp_path, "w") as f:
+        json.dump(records, f, indent=2)
+    os.replace(tmp_path, path)
+
+
 def train_loop(config: Config):
     logger = Logger()
     mesh = get_mesh(config)
@@ -997,6 +1017,14 @@ def train_loop(config: Config):
         logger.msg(f"Loaded {len(val_batches)} validation batches for this process.")
 
         logger.msg("Starting training...")
+        # Gradient-norm diagnostic: collected per step and dumped to a standalone
+        # JSON file (separate from logs/); purely observational, master only.
+        grad_norm_records = []
+        grad_norm_json_path = (
+            os.environ.get("GRAD_NORM_JSON", f"grad_norms_{logger.run_id}.json")
+            if logger.is_master
+            else None
+        )
         last_step_time = time.time()
         for step in range(config.n_train_iters):
             batched_x, batched_y = next(train_loader)
@@ -1014,6 +1042,13 @@ def train_loop(config: Config):
             # Read loss from local addressable shard (replicated scalar; no
             # cross-host gather). Forces a host sync, which also paces the loop.
             loss_val = float(np.asarray(metrics["loss"].addressable_data(0)))
+            if grad_norm_json_path is not None:
+                grad_norm_records.append({
+                    "step": step,
+                    "grad_norm": float(
+                        np.asarray(metrics["grad_norm"].addressable_data(0))
+                    ),
+                })
             now = time.time()
             step_secs = now - last_step_time
             last_step_time = now
@@ -1039,6 +1074,8 @@ def train_loop(config: Config):
                     logger,
                     compiled_eval_fn,
                 )
+                if grad_norm_json_path is not None:
+                    _write_grad_norm_diagnostics(grad_norm_json_path, grad_norm_records)
                 if (
                     config.early_stop_on_target
                     and val_loss is not None
@@ -1071,6 +1108,9 @@ def train_loop(config: Config):
             compiled_eval_fn,
         )
         logger.flush()
+        if grad_norm_json_path is not None:
+            _write_grad_norm_diagnostics(grad_norm_json_path, grad_norm_records)
+            logger.msg(f"Wrote gradient-norm diagnostics to {grad_norm_json_path}")
         logger.msg("Training finished.")
         logger.dump(step, params, opt_state, config)
 
