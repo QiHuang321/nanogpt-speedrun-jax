@@ -433,10 +433,13 @@ def muon(
         step = state["step"]
         lr = base_lr * get_lr(step, n_warmup_iters, n_warmdown_iters, n_train_iters)
         ns_steps = get_ns_iters(step, ns_iters_min, ns_iters, n_train_iters)
-        frac = jnp.minimum(step / momentum_warmup_steps, 1.0)
-        momentum = warmup_momentum_init + frac * (
+        # Exponential approach: the gap to the final momentum decays
+        # exponentially with momentum_warmup_steps as the time constant, so
+        # momentum starts at warmup_momentum_init and asymptotes toward
+        # warmup_momentum_final (rather than ramping linearly).
+        momentum = warmup_momentum_final - (
             warmup_momentum_final - warmup_momentum_init
-        )
+        ) * jnp.exp(-step / momentum_warmup_steps)
         new_m = tree_map(
             lambda m, g: (m + (1 - momentum).astype(m.dtype) * (g - m)).astype(m.dtype),
             state["m"],
