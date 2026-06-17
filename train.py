@@ -312,9 +312,12 @@ class Optimizer(NamedTuple):
 
 
 def get_lr(it, n_warmup_iters, n_warmdown_iters, n_train_iters):
+    # Warmup-stable-decay (trapezoid): linear warmup up to the peak, a constant
+    # "stable" phase at the peak, then a linear decay all the way down to zero.
+    # The stable multiplier stays 1.0, so the peak LR is unchanged.
     warmup_lr = (it + 1) / n_warmup_iters
     constant_lr = 1.0
-    warmdown_lr = (n_train_iters - it) / n_warmdown_iters * (1.0 - 0.1) + 0.1
+    warmdown_lr = (n_train_iters - it) / n_warmdown_iters
     lr = jnp.where(
         it < n_warmup_iters,
         warmup_lr,
