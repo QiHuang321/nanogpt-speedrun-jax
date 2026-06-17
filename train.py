@@ -253,7 +253,7 @@ class Config:
     adam_lm_head_beta2: float = 0.95
 
     # muon for matrices
-    muon_base_lr: float = 0.04
+    muon_base_lr: float = 0.01
     muon_momentum_warmup_steps: int = 500
     muon_warmup_momentum_init: float = 0.85
     muon_warmup_momentum_final: float = 0.95
@@ -851,7 +851,7 @@ def gpt_forward(params, idx, precomputed_params, config):
         x, v1 = block_forward(params["h"][i], x, v1, x0, cos, sin, config)
         skip_connections.append(x)
     for i in range(n_decoder_layers):
-        x = x + params["skip_weights"][i] * skip_connections.pop()
+        _ = skip_connections.pop()  # unet skip removed (handicap)
         x, v1 = block_forward(
             params["h"][n_encoder_layers + i], x, v1, x0, cos, sin, config
         )
