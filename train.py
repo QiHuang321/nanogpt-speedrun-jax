@@ -243,12 +243,12 @@ class Config:
     adam_eps: float = 1e-10
 
     # adam for embeddings
-    adam_embed_base_lr: float = 0.6
+    adam_embed_base_lr: float = 1.8
     adam_embed_beta1: float = 0.9
     adam_embed_beta2: float = 0.95
 
     # adam for lm head
-    adam_lm_head_base_lr: float = 0.008
+    adam_lm_head_base_lr: float = 0.001
     adam_lm_head_beta1: float = 0.9
     adam_lm_head_beta2: float = 0.95
 
@@ -261,7 +261,7 @@ class Config:
     muon_eps: float = 1e-7
 
     # adam for non-matrices
-    adam_nonmat_base_lr: float = 0.04
+    adam_nonmat_base_lr: float = 0.12
     adam_nonmat_beta1: float = 0.9
     adam_nonmat_beta2: float = 0.95
 
