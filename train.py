@@ -248,7 +248,7 @@ class Config:
     adam_embed_beta2: float = 0.95
 
     # adam for lm head
-    adam_lm_head_base_lr: float = 0.008
+    adam_lm_head_base_lr: float = 0.001
     adam_lm_head_beta1: float = 0.9
     adam_lm_head_beta2: float = 0.95
 
@@ -271,7 +271,7 @@ class Config:
     n_heads: int = 4
     d_head: int = 0
     logit_softcap: float = 15.0
-    rope_base: float = 1024
+    rope_base: float = 10000
     vocab_size: int = 50304
     dtype: str = "bfloat16"
 
@@ -821,7 +821,7 @@ def attention_forward(params, x, v1, cos, sin, config):
 
 def mlp_forward(params, x):
     x = linear(x, params["c_fc"])
-    x = relu(x) ** 2
+    x = jax.nn.gelu(x)  # relu^2 removed (handicap)
     x = linear(x, params["c_proj"])
     return x
 
@@ -857,9 +857,7 @@ def gpt_forward(params, idx, precomputed_params, config):
         )
     x = rms_norm(x, config)
     logits = linear(x, params["lm_head"])
-    logits = (2.0 * config.logit_softcap) * jax.nn.sigmoid(
-        logits / (config.logit_softcap / 2.0)
-    )
+    logits = logits  # softcap removed (handicap)
     return logits.astype(jnp.float32)
 
 
