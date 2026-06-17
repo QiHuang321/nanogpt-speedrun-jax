@@ -213,8 +213,8 @@ class Config:
 
     # iteration handling
     n_train_iters: int = 1675
-    n_warmup_iters: int = 0
-    f_warmdown_iters: float = 0.0  # handicap
+    n_warmup_iters: int = 50  # WSD trapezoid: linear LR warmup steps
+    f_warmdown_iters: float = 0.4  # WSD trapezoid: fraction of training in the LR decay phase
     n_warmdown_iters: int = 0
     val_loss_every: int = 125
     val_tokens: int = 10485760
@@ -312,13 +312,26 @@ class Optimizer(NamedTuple):
 
 
 def get_lr(it, n_warmup_iters, n_warmdown_iters, n_train_iters):
-    warmup_lr = (it + 1) / n_warmup_iters
-    constant_lr = 1.0
-    warmdown_lr = (n_train_iters - it) / n_warmdown_iters * (1.0 - 0.1) + 0.1
+    # Warmup-stable-decay (trapezoid) schedule. Returns a multiplier applied to
+    # each optimizer's peak (base) LR, so the peak LR itself is unchanged: the
+    # stable phase is held at 1.0.
+    #   1) linear warmup 0 -> 1 over the first n_warmup_iters steps
+    #   2) stable phase held at the peak (multiplier 1.0)
+    #   3) linear decay 1 -> 0 over the final n_warmdown_iters steps
+    # jnp.maximum(..., 1) guards against divide-by-zero when a phase is disabled
+    # (length 0); the surrounding jnp.where discards that branch anyway.
+    warmup_lr = jnp.where(
+        n_warmup_iters > 0, (it + 1) / jnp.maximum(n_warmup_iters, 1), 1.0
+    )
+    warmdown_lr = jnp.where(
+        n_warmdown_iters > 0,
+        (n_train_iters - it) / jnp.maximum(n_warmdown_iters, 1),
+        0.0,
+    )
     lr = jnp.where(
         it < n_warmup_iters,
         warmup_lr,
-        jnp.where(it < n_train_iters - n_warmdown_iters, constant_lr, warmdown_lr),
+        jnp.where(it < n_train_iters - n_warmdown_iters, 1.0, warmdown_lr),
     )
     return lr
 
