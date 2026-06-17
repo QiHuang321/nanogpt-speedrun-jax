@@ -217,7 +217,7 @@ class Config:
     # f_warmup_iters of training, hold at the (unchanged) peak, then linear
     # decay to ~0 over the last f_warmdown_iters. n_warmup_iters/n_warmdown_iters
     # are derived from these fractions in __post_init__.
-    f_warmup_iters: float = 0.05
+    f_warmup_iters: float = 0.06
     n_warmup_iters: int = 0
     f_warmdown_iters: float = 0.2
     n_warmdown_iters: int = 0
