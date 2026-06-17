@@ -248,12 +248,12 @@ class Config:
     adam_embed_beta2: float = 0.95
 
     # adam for lm head
-    adam_lm_head_base_lr: float = 0.008
+    adam_lm_head_base_lr: float = 0.001
     adam_lm_head_beta1: float = 0.9
     adam_lm_head_beta2: float = 0.95
 
     # muon for matrices
-    muon_base_lr: float = 0.04
+    muon_base_lr: float = 0.01
     muon_momentum_warmup_steps: int = 500
     muon_warmup_momentum_init: float = 0.85
     muon_warmup_momentum_final: float = 0.95
@@ -261,7 +261,7 @@ class Config:
     muon_eps: float = 1e-7
 
     # adam for non-matrices
-    adam_nonmat_base_lr: float = 0.04
+    adam_nonmat_base_lr: float = 0.12
     adam_nonmat_beta1: float = 0.9
     adam_nonmat_beta2: float = 0.95
 
@@ -821,7 +821,7 @@ def attention_forward(params, x, v1, cos, sin, config):
 
 def mlp_forward(params, x):
     x = linear(x, params["c_fc"])
-    x = relu(x) ** 2
+    x = jax.nn.gelu(x)  # relu^2 removed (handicap)
     x = linear(x, params["c_proj"])
     return x
 
