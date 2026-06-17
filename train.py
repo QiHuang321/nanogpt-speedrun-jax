@@ -271,7 +271,7 @@ class Config:
     n_heads: int = 4
     d_head: int = 0
     logit_softcap: float = 15.0
-    rope_base: float = 1024
+    rope_base: float = 10000
     vocab_size: int = 50304
     dtype: str = "bfloat16"
 
@@ -851,15 +851,13 @@ def gpt_forward(params, idx, precomputed_params, config):
         x, v1 = block_forward(params["h"][i], x, v1, x0, cos, sin, config)
         skip_connections.append(x)
     for i in range(n_decoder_layers):
-        x = x + params["skip_weights"][i] * skip_connections.pop()
+        _ = skip_connections.pop()  # unet skip removed (handicap)
         x, v1 = block_forward(
             params["h"][n_encoder_layers + i], x, v1, x0, cos, sin, config
         )
     x = rms_norm(x, config)
     logits = linear(x, params["lm_head"])
-    logits = (2.0 * config.logit_softcap) * jax.nn.sigmoid(
-        logits / (config.logit_softcap / 2.0)
-    )
+    logits = logits  # softcap removed (handicap)
     return logits.astype(jnp.float32)
 
 
