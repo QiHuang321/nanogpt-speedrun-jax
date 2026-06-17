@@ -214,7 +214,7 @@ class Config:
     # iteration handling
     n_train_iters: int = 1675
     n_warmup_iters: int = 0
-    f_warmdown_iters: float = 0.4
+    f_warmdown_iters: float = 0.0
     n_warmdown_iters: int = 0
     val_loss_every: int = 125
     val_tokens: int = 10485760
@@ -254,14 +254,14 @@ class Config:
 
     # muon for matrices
     muon_base_lr: float = 0.04
-    muon_momentum_warmup_steps: int = 500
+    muon_momentum_warmup_steps: int = 1
     muon_warmup_momentum_init: float = 0.85
     muon_warmup_momentum_final: float = 0.95
-    muon_ns_iters: int = 5
+    muon_ns_iters: int = 2
     muon_eps: float = 1e-7
 
     # adam for non-matrices
-    adam_nonmat_base_lr: float = 0.04
+    adam_nonmat_base_lr: float = 0.12
     adam_nonmat_beta1: float = 0.9
     adam_nonmat_beta2: float = 0.95
 
@@ -810,8 +810,8 @@ def attention_forward(params, x, v1, cos, sin, config):
     if v1 is None:
         v1 = v
     v = (1 - params["lamb"]) * v + params["lamb"] * v1.reshape(v.shape)
-    q = apply_rotary_emb(rms_norm(q, config), cos, sin)
-    k = apply_rotary_emb(rms_norm(k, config), cos, sin)
+    q = apply_rotary_emb(q, cos, sin)
+    k = apply_rotary_emb(k, cos, sin)
     y = dot_product_attention(q, k, v, scale=params["scale"], is_causal=True).reshape(
         B, T, C
     )
@@ -821,7 +821,7 @@ def attention_forward(params, x, v1, cos, sin, config):
 
 def mlp_forward(params, x):
     x = linear(x, params["c_fc"])
-    x = relu(x) ** 2
+    x = jax.nn.gelu(x)  # relu^2 removed (handicap)
     x = linear(x, params["c_proj"])
     return x
 
