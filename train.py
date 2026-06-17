@@ -433,7 +433,7 @@ def muon(
         step = state["step"]
         lr = base_lr * get_lr(step, n_warmup_iters, n_warmdown_iters, n_train_iters)
         ns_steps = get_ns_iters(step, ns_iters_min, ns_iters, n_train_iters)
-        frac = jnp.minimum(step / momentum_warmup_steps, 1.0)
+        frac = 1.0 - jnp.exp(-step / momentum_warmup_steps)
         momentum = warmup_momentum_init + frac * (
             warmup_momentum_final - warmup_momentum_init
         )
