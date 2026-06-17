@@ -213,12 +213,14 @@ class Config:
 
     # iteration handling
     n_train_iters: int = 1675
-    # LR schedule is warmup-stable-decay (trapezoid): linear warmup over the
-    # first f_warmup_iters fraction of training, then a stable phase held at the
-    # peak LR, then linear decay to ~0 over the final f_warmdown_iters fraction.
-    # The absolute step counts are derived from these fractions in __post_init__.
+    # LR schedule is warmup-stable-decay (trapezoid): linear warmup from 0 up to
+    # the peak LR over the first n_warmup_iters steps, then a stable phase held at
+    # the peak LR, then linear decay to ~0 over the final f_warmdown_iters
+    # fraction. n_warmup_iters is an explicit absolute step count; if left at 0 it
+    # falls back to the f_warmup_iters fraction. n_warmdown_iters is derived from
+    # its fraction in __post_init__.
     f_warmup_iters: float = 0.05
-    n_warmup_iters: int = 0
+    n_warmup_iters: int = 100
     f_warmdown_iters: float = 0.2  # handicap
     n_warmdown_iters: int = 0
     val_loss_every: int = 125
@@ -289,9 +291,12 @@ class Config:
         object.__setattr__(self, "mesh_shape", (jax.device_count(),))
         assert self.batch_size % self.micro_batch_size == 0
 
-        object.__setattr__(
-            self, "n_warmup_iters", int(self.n_train_iters * self.f_warmup_iters)
-        )
+        # Warmup uses the explicit n_warmup_iters step count; fall back to the
+        # f_warmup_iters fraction only when it is left at 0.
+        if self.n_warmup_iters == 0:
+            object.__setattr__(
+                self, "n_warmup_iters", int(self.n_train_iters * self.f_warmup_iters)
+            )
         object.__setattr__(
             self, "n_warmdown_iters", int(self.n_train_iters * self.f_warmdown_iters)
         )
