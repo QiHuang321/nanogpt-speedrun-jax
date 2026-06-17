@@ -217,7 +217,7 @@ class Config:
     # first f_warmup_iters fraction of training, then a stable phase held at the
     # peak LR, then linear decay to ~0 over the final f_warmdown_iters fraction.
     # The absolute step counts are derived from these fractions in __post_init__.
-    f_warmup_iters: float = 0.05
+    f_warmup_iters: float = 0.06  # 100-step LR warmup at n_train_iters=1675
     n_warmup_iters: int = 0
     f_warmdown_iters: float = 0.2  # handicap
     n_warmdown_iters: int = 0
