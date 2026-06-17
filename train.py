@@ -213,6 +213,7 @@ class Config:
 
     # iteration handling
     n_train_iters: int = 1675
+    f_warmup_iters: float = 0.05
     n_warmup_iters: int = 0
     f_warmdown_iters: float = 0.4
     n_warmdown_iters: int = 0
@@ -284,6 +285,9 @@ class Config:
         assert self.batch_size % self.micro_batch_size == 0
 
         object.__setattr__(
+            self, "n_warmup_iters", int(self.n_train_iters * self.f_warmup_iters)
+        )
+        object.__setattr__(
             self, "n_warmdown_iters", int(self.n_train_iters * self.f_warmdown_iters)
         )
         assert self.d_model % self.n_heads == 0
@@ -312,13 +316,18 @@ class Optimizer(NamedTuple):
 
 
 def get_lr(it, n_warmup_iters, n_warmdown_iters, n_train_iters):
-    warmup_lr = (it + 1) / n_warmup_iters
-    constant_lr = 1.0
-    warmdown_lr = (n_train_iters - it) / n_warmdown_iters * (1.0 - 0.1) + 0.1
+    # Warmup-stable-decay (trapezoid) schedule: linearly warm up to the peak LR
+    # multiplier, hold it constant through the stable phase, then linearly decay
+    # back to zero over the final n_warmdown_iters steps. The peak multiplier is
+    # 1.0, so the peak LR (base_lr) is unchanged. jnp.maximum guards the
+    # divisions when a phase length is zero (that branch is then never selected).
+    warmup_lr = (it + 1) / jnp.maximum(n_warmup_iters, 1)
+    stable_lr = 1.0
+    decay_lr = (n_train_iters - it) / jnp.maximum(n_warmdown_iters, 1)
     lr = jnp.where(
         it < n_warmup_iters,
         warmup_lr,
-        jnp.where(it < n_train_iters - n_warmdown_iters, constant_lr, warmdown_lr),
+        jnp.where(it < n_train_iters - n_warmdown_iters, stable_lr, decay_lr),
     )
     return lr
 
