@@ -214,7 +214,7 @@ class Config:
     # iteration handling
     n_train_iters: int = 1675
     n_warmup_iters: int = 0
-    f_warmdown_iters: float = 0.4
+    f_warmdown_iters: float = 0.0
     n_warmdown_iters: int = 0
     val_loss_every: int = 125
     val_tokens: int = 10485760
@@ -243,7 +243,7 @@ class Config:
     adam_eps: float = 1e-10
 
     # adam for embeddings
-    adam_embed_base_lr: float = 0.6
+    adam_embed_base_lr: float = 1.8
     adam_embed_beta1: float = 0.9
     adam_embed_beta2: float = 0.95
 
@@ -261,7 +261,7 @@ class Config:
     muon_eps: float = 1e-7
 
     # adam for non-matrices
-    adam_nonmat_base_lr: float = 0.04
+    adam_nonmat_base_lr: float = 0.12
     adam_nonmat_beta1: float = 0.9
     adam_nonmat_beta2: float = 0.95
 
@@ -271,7 +271,7 @@ class Config:
     n_heads: int = 4
     d_head: int = 0
     logit_softcap: float = 15.0
-    rope_base: float = 1024
+    rope_base: float = 10000
     vocab_size: int = 50304
     dtype: str = "bfloat16"
 
@@ -810,8 +810,8 @@ def attention_forward(params, x, v1, cos, sin, config):
     if v1 is None:
         v1 = v
     v = (1 - params["lamb"]) * v + params["lamb"] * v1.reshape(v.shape)
-    q = apply_rotary_emb(rms_norm(q, config), cos, sin)
-    k = apply_rotary_emb(rms_norm(k, config), cos, sin)
+    q = apply_rotary_emb(q, cos, sin)
+    k = apply_rotary_emb(k, cos, sin)
     y = dot_product_attention(q, k, v, scale=params["scale"], is_causal=True).reshape(
         B, T, C
     )
