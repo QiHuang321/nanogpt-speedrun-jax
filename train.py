@@ -853,7 +853,7 @@ def gpt_forward(params, idx, precomputed_params, config):
         x, v1 = block_forward(params["h"][i], x, v1, x0, cos, sin, config)
         skip_connections.append(x)
     for i in range(n_decoder_layers):
-        _ = skip_connections.pop()  # unet skip removed (handicap)
+        x = x + params["skip_weights"][i] * skip_connections.pop()
         x, v1 = block_forward(
             params["h"][n_encoder_layers + i], x, v1, x0, cos, sin, config
         )
