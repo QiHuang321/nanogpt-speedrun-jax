@@ -248,7 +248,7 @@ class Config:
     adam_embed_beta2: float = 0.95
 
     # adam for lm head
-    adam_lm_head_base_lr: float = 0.008
+    adam_lm_head_base_lr: float = 0.001
     adam_lm_head_beta1: float = 0.9
     adam_lm_head_beta2: float = 0.95
 
@@ -261,7 +261,7 @@ class Config:
     muon_eps: float = 1e-7
 
     # adam for non-matrices
-    adam_nonmat_base_lr: float = 0.04
+    adam_nonmat_base_lr: float = 0.12
     adam_nonmat_beta1: float = 0.9
     adam_nonmat_beta2: float = 0.95
 
@@ -810,8 +810,8 @@ def attention_forward(params, x, v1, cos, sin, config):
     if v1 is None:
         v1 = v
     v = (1 - params["lamb"]) * v + params["lamb"] * v1.reshape(v.shape)
-    q = apply_rotary_emb(rms_norm(q, config), cos, sin)
-    k = apply_rotary_emb(rms_norm(k, config), cos, sin)
+    q = apply_rotary_emb(q, cos, sin)
+    k = apply_rotary_emb(k, cos, sin)
     y = dot_product_attention(q, k, v, scale=params["scale"], is_causal=True).reshape(
         B, T, C
     )
@@ -851,7 +851,7 @@ def gpt_forward(params, idx, precomputed_params, config):
         x, v1 = block_forward(params["h"][i], x, v1, x0, cos, sin, config)
         skip_connections.append(x)
     for i in range(n_decoder_layers):
-        x = x + params["skip_weights"][i] * skip_connections.pop()
+        _ = skip_connections.pop()  # unet skip removed (handicap)
         x, v1 = block_forward(
             params["h"][n_encoder_layers + i], x, v1, x0, cos, sin, config
         )
