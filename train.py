@@ -213,8 +213,8 @@ class Config:
 
     # iteration handling
     n_train_iters: int = 1675
-    n_warmup_iters: int = 0
-    f_warmdown_iters: float = 0.0
+    n_warmup_iters: int = 100
+    f_warmdown_iters: float = 0.2
     n_warmdown_iters: int = 0
     val_loss_every: int = 125
     val_tokens: int = 10485760
@@ -312,15 +312,20 @@ class Optimizer(NamedTuple):
 
 
 def get_lr(it, n_warmup_iters, n_warmdown_iters, n_train_iters):
-    warmup_lr = (it + 1) / n_warmup_iters
-    constant_lr = 1.0
-    warmdown_lr = (n_train_iters - it) / n_warmdown_iters * (1.0 - 0.1) + 0.1
+    # Warmup-stable-decay (trapezoid) schedule, normalized to a peak of 1.0 so
+    # the peak LR equals each optimizer's base_lr (peak LR unchanged):
+    #   1) linear warmup    0 -> 1 over the first n_warmup_iters steps
+    #   2) stable (plateau) at 1 through the middle of training
+    #   3) linear decay     1 -> 0 over the final n_warmdown_iters steps
+    warmup_lr = (it + 1) / max(n_warmup_iters, 1)
+    stable_lr = 1.0
+    warmdown_lr = (n_train_iters - it) / max(n_warmdown_iters, 1)
     lr = jnp.where(
         it < n_warmup_iters,
         warmup_lr,
-        jnp.where(it < n_train_iters - n_warmdown_iters, constant_lr, warmdown_lr),
+        jnp.where(it < n_train_iters - n_warmdown_iters, stable_lr, warmdown_lr),
     )
-    return lr
+    return jnp.clip(lr, 0.0, 1.0)
 
 
 def adam(
