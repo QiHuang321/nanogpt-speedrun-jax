@@ -214,7 +214,7 @@ class Config:
     # iteration handling
     n_train_iters: int = 1675
     n_warmup_iters: int = 0
-    f_warmdown_iters: float = 0.4
+    f_warmdown_iters: float = 0.0
     n_warmdown_iters: int = 0
     val_loss_every: int = 125
     val_tokens: int = 10485760
@@ -248,7 +248,7 @@ class Config:
     adam_embed_beta2: float = 0.95
 
     # adam for lm head
-    adam_lm_head_base_lr: float = 0.008
+    adam_lm_head_base_lr: float = 0.001
     adam_lm_head_beta1: float = 0.9
     adam_lm_head_beta2: float = 0.95
 
@@ -257,11 +257,11 @@ class Config:
     muon_momentum_warmup_steps: int = 500
     muon_warmup_momentum_init: float = 0.85
     muon_warmup_momentum_final: float = 0.95
-    muon_ns_iters: int = 5
+    muon_ns_iters: int = 2
     muon_eps: float = 1e-7
 
     # adam for non-matrices
-    adam_nonmat_base_lr: float = 0.04
+    adam_nonmat_base_lr: float = 0.12
     adam_nonmat_beta1: float = 0.9
     adam_nonmat_beta2: float = 0.95
 
@@ -271,7 +271,7 @@ class Config:
     n_heads: int = 4
     d_head: int = 0
     logit_softcap: float = 15.0
-    rope_base: float = 1024
+    rope_base: float = 10000
     vocab_size: int = 50304
     dtype: str = "bfloat16"
 
