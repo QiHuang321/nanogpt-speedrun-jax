@@ -213,8 +213,8 @@ class Config:
 
     # iteration handling
     n_train_iters: int = 1675
-    n_warmup_iters: int = 0
-    f_warmdown_iters: float = 0.0
+    n_warmup_iters: int = 100
+    f_warmdown_iters: float = 0.2
     n_warmdown_iters: int = 0
     val_loss_every: int = 125
     val_tokens: int = 10485760
@@ -312,15 +312,17 @@ class Optimizer(NamedTuple):
 
 
 def get_lr(it, n_warmup_iters, n_warmdown_iters, n_train_iters):
-    warmup_lr = (it + 1) / n_warmup_iters
-    constant_lr = 1.0
-    warmdown_lr = (n_train_iters - it) / n_warmdown_iters * (1.0 - 0.1) + 0.1
-    lr = jnp.where(
-        it < n_warmup_iters,
-        warmup_lr,
-        jnp.where(it < n_train_iters - n_warmdown_iters, constant_lr, warmdown_lr),
-    )
-    return lr
+    # Warmup-stable-decay (trapezoid) schedule, returned as a multiplier on the
+    # per-optimizer base LR so the peak (stable-phase) LR is unchanged at
+    # 1.0 * base_lr. Linearly warm up 0 -> 1 over the first n_warmup_iters steps,
+    # hold at the peak through the stable phase, then linearly decay 1 -> 0 over
+    # the final n_warmdown_iters steps. Written as the minimum of the three
+    # bounding lines so it degrades gracefully to a constant schedule when
+    # n_warmup_iters / n_warmdown_iters are zero (and never divides by zero).
+    warmup_lr = (it + 1) / jnp.maximum(n_warmup_iters, 1)
+    warmdown_lr = (n_train_iters - it) / jnp.maximum(n_warmdown_iters, 1)
+    lr = jnp.minimum(jnp.minimum(warmup_lr, 1.0), warmdown_lr)
+    return jnp.clip(lr, 0.0, 1.0)
 
 
 def adam(
