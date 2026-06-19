@@ -821,7 +821,7 @@ def attention_forward(params, x, v1, cos, sin, config):
 
 def mlp_forward(params, x):
     x = linear(x, params["c_fc"])
-    x = jax.nn.gelu(x)  # relu^2 removed (handicap)
+    x = jax.nn.relu(x) ** 2  # relu^2 (swapped from gelu)
     x = linear(x, params["c_proj"])
     return x
 
