@@ -214,7 +214,7 @@ class Config:
     # iteration handling
     n_train_iters: int = 1675
     n_warmup_iters: int = 0
-    f_warmdown_iters: float = 0.4
+    f_warmdown_iters: float = 0.0
     n_warmdown_iters: int = 0
     val_loss_every: int = 125
     val_tokens: int = 10485760
@@ -253,15 +253,15 @@ class Config:
     adam_lm_head_beta2: float = 0.95
 
     # muon for matrices
-    muon_base_lr: float = 0.04
+    muon_base_lr: float = 0.01
     muon_momentum_warmup_steps: int = 500
     muon_warmup_momentum_init: float = 0.85
     muon_warmup_momentum_final: float = 0.95
-    muon_ns_iters: int = 5
+    muon_ns_iters: int = 2
     muon_eps: float = 1e-7
 
     # adam for non-matrices
-    adam_nonmat_base_lr: float = 0.04
+    adam_nonmat_base_lr: float = 0.12
     adam_nonmat_beta1: float = 0.9
     adam_nonmat_beta2: float = 0.95
 
@@ -857,9 +857,7 @@ def gpt_forward(params, idx, precomputed_params, config):
         )
     x = rms_norm(x, config)
     logits = linear(x, params["lm_head"])
-    logits = (2.0 * config.logit_softcap) * jax.nn.sigmoid(
-        logits / (config.logit_softcap / 2.0)
-    )
+    logits = logits  # softcap removed (handicap)
     return logits.astype(jnp.float32)
 
 
