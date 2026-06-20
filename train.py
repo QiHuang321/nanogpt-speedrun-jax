@@ -219,7 +219,7 @@ class Config:
     # peak LR (== each group's base_lr) is unchanged from the constant schedule.
     # n_warmup_iters / n_warmdown_iters are derived from the fractions below in
     # __post_init__ so they track n_train_iters.
-    f_warmup_iters: float = 0.05
+    f_warmup_iters: float = 0.06  # -> int(1675 * 0.06) = 100 warmup steps
     n_warmup_iters: int = 0
     f_warmdown_iters: float = 0.2
     n_warmdown_iters: int = 0
