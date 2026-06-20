@@ -367,11 +367,13 @@ def zeropower_via_newtonschulz5(G, steps, eps):
 
     def _update_loop(X):
         a, b, c = (3.4445, -4.7750, 2.0315)
-        for i in range(steps):
+
+        def _ns_step(i, X):
             A = X @ X.T
             B = b * A + c * (A @ A)
-            X = a * X + B @ X
-        return X
+            return a * X + B @ X
+
+        return fori_loop(0, steps, _ns_step, X)
 
     def tall_case(g):
         X = g.T.astype(jnp.bfloat16)
@@ -418,11 +420,21 @@ def muon(
             grads,
         )
 
+        # Adaptive Newton-Schulz iteration count: use fewer iterations early in
+        # training (when gradients are noisy and momentum is still warming up),
+        # ramping linearly up to the configured ns_iters by the end of training.
+        ns_frac = jnp.minimum(step / n_train_iters, 1.0)
+        ns_iters_now = jnp.maximum(
+            jnp.round(1.0 + ns_frac * (ns_iters - 1)).astype(jnp.int32), 1
+        )
+
         def _update_leaf(g, p, m):
             g_nesterov = g + momentum.astype(m.dtype) * (m - g)
             update = (
                 lr.astype(p.dtype)
-                * zeropower_via_newtonschulz5(g_nesterov, ns_iters, eps).astype(p.dtype)
+                * zeropower_via_newtonschulz5(g_nesterov, ns_iters_now, eps).astype(
+                    p.dtype
+                )
                 * jnp.sqrt(jnp.maximum(1.0, g.shape[0] / g.shape[1])).astype(p.dtype)
             )
             return p - update
