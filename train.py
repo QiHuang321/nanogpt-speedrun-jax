@@ -257,11 +257,11 @@ class Config:
     muon_momentum_warmup_steps: int = 500
     muon_warmup_momentum_init: float = 0.85
     muon_warmup_momentum_final: float = 0.95
-    muon_ns_iters: int = 5
+    muon_ns_iters: int = 2
     muon_eps: float = 1e-7
 
     # adam for non-matrices
-    adam_nonmat_base_lr: float = 0.04
+    adam_nonmat_base_lr: float = 0.12
     adam_nonmat_beta1: float = 0.9
     adam_nonmat_beta2: float = 0.95
 
@@ -810,8 +810,8 @@ def attention_forward(params, x, v1, cos, sin, config):
     if v1 is None:
         v1 = v
     v = (1 - params["lamb"]) * v + params["lamb"] * v1.reshape(v.shape)
-    q = apply_rotary_emb(rms_norm(q, config), cos, sin)
-    k = apply_rotary_emb(rms_norm(k, config), cos, sin)
+    q = apply_rotary_emb(q, cos, sin)
+    k = apply_rotary_emb(k, cos, sin)
     y = dot_product_attention(q, k, v, scale=params["scale"], is_causal=True).reshape(
         B, T, C
     )
@@ -857,9 +857,7 @@ def gpt_forward(params, idx, precomputed_params, config):
         )
     x = rms_norm(x, config)
     logits = linear(x, params["lm_head"])
-    logits = (2.0 * config.logit_softcap) * jax.nn.sigmoid(
-        logits / (config.logit_softcap / 2.0)
-    )
+    logits = logits  # softcap removed (handicap)
     return logits.astype(jnp.float32)
 
 
