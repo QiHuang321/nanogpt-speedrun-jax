@@ -258,6 +258,10 @@ class Config:
     muon_warmup_momentum_init: float = 0.85
     muon_warmup_momentum_final: float = 0.95
     muon_ns_iters: int = 2
+    # adaptive newton-schulz: use fewer iterations early in training, ramping
+    # up to muon_ns_iters over the first muon_ns_iters_ramp_frac of training.
+    muon_ns_iters_min: int = 1
+    muon_ns_iters_ramp_frac: float = 0.5
     muon_eps: float = 1e-7
 
     # adam for non-matrices
@@ -323,6 +327,15 @@ def get_lr(it, n_warmup_iters, n_warmdown_iters, n_train_iters):
     return lr
 
 
+def get_ns_iters(it, ns_iters_min, ns_iters_max, ramp_steps):
+    # Newton-Schulz iteration count, adaptive to the training step: fewer early
+    # (gradients are noisy and don't need precise orthogonalization), linearly
+    # ramping up to the full count by ramp_steps.
+    frac = jnp.minimum(it / jnp.maximum(ramp_steps, 1.0), 1.0)
+    iters = ns_iters_min + frac * (ns_iters_max - ns_iters_min)
+    return jnp.round(iters).astype(jnp.int32)
+
+
 def adam(
     base_lr: float,
     b1: float,
@@ -367,11 +380,15 @@ def zeropower_via_newtonschulz5(G, steps, eps):
 
     def _update_loop(X):
         a, b, c = (3.4445, -4.7750, 2.0315)
-        for i in range(steps):
+
+        def _body(i, X):
             A = X @ X.T
             B = b * A + c * (A @ A)
-            X = a * X + B @ X
-        return X
+            return a * X + B @ X
+
+        # steps may be a traced value (adaptive per training step), so use
+        # fori_loop rather than a Python loop with a static count.
+        return fori_loop(0, steps, _body, X)
 
     def tall_case(g):
         X = g.T.astype(jnp.bfloat16)
@@ -396,9 +413,12 @@ def muon(
     n_warmup_iters: int,
     n_warmdown_iters: int,
     n_train_iters: int,
-    ns_iters: int,
+    ns_iters_min: int,
+    ns_iters_max: int,
+    ns_iters_ramp_frac: float,
     eps: float,
 ):
+    ns_ramp_steps = ns_iters_ramp_frac * n_train_iters
 
     def init(params):
         m = tree_map(jnp.zeros_like, params)
@@ -408,6 +428,7 @@ def muon(
     def update(grads, params, state):
         step = state["step"]
         lr = base_lr * get_lr(step, n_warmup_iters, n_warmdown_iters, n_train_iters)
+        ns_iters = get_ns_iters(step, ns_iters_min, ns_iters_max, ns_ramp_steps)
         frac = jnp.minimum(step / momentum_warmup_steps, 1.0)
         momentum = warmup_momentum_init + frac * (
             warmup_momentum_final - warmup_momentum_init
@@ -763,7 +784,9 @@ def init_optimizer(config: Config, params: PyTree, mesh: Mesh):
         config.n_warmup_iters,
         config.n_warmdown_iters,
         config.n_train_iters,
+        config.muon_ns_iters_min,
         config.muon_ns_iters,
+        config.muon_ns_iters_ramp_frac,
         config.muon_eps,
     )
 
