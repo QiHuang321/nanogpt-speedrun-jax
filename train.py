@@ -254,7 +254,7 @@ class Config:
 
     # muon for matrices
     muon_base_lr: float = 0.04
-    muon_momentum_warmup_steps: int = 500
+    muon_momentum_warmup_steps: int = 1
     muon_warmup_momentum_init: float = 0.85
     muon_warmup_momentum_final: float = 0.95
     muon_ns_iters: int = 5
