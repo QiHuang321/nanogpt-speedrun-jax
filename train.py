@@ -243,7 +243,7 @@ class Config:
     adam_eps: float = 1e-10
 
     # adam for embeddings
-    adam_embed_base_lr: float = 0.6
+    adam_embed_base_lr: float = 1.8
     adam_embed_beta1: float = 0.9
     adam_embed_beta2: float = 0.95
 
