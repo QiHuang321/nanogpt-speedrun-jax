@@ -861,7 +861,8 @@ def gpt_forward(params, idx, precomputed_params, config):
         )
     x = rms_norm(x, config)
     logits = linear(x, params["lm_head"])
-    logits = logits  # softcap removed (handicap)
+    c = config.logit_softcap
+    logits = 2 * c * jax.nn.sigmoid(logits / (c / 2))  # tanh-style logit softcap
     return logits.astype(jnp.float32)
 
 
