@@ -216,7 +216,7 @@ class Config:
     # Warmup-stable-decay (trapezoid) schedule: linear warmup over the first
     # n_warmup_iters steps, hold at peak, then linear decay over the final
     # f_warmdown_iters fraction of training. Peak LR is unchanged (multiplier 1.0).
-    n_warmup_iters: int = 50
+    n_warmup_iters: int = 100
     f_warmdown_iters: float = 0.2
     n_warmdown_iters: int = 0
     val_loss_every: int = 125
