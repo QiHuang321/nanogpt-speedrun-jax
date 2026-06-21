@@ -214,7 +214,11 @@ class Config:
     # iteration handling
     n_train_iters: int = 1675
     n_warmup_iters: int = 100
-    f_warmdown_iters: float = 0.0
+    # Warmup-stable-decay (trapezoid) LR schedule: linear warmup, hold at peak,
+    # then linear decay over the final f_warmdown_iters fraction of training.
+    # Peak LR is unchanged (get_lr multiplier stays 1.0 on the plateau); this
+    # only enables the decay tail (n_warmdown_iters derived in __post_init__).
+    f_warmdown_iters: float = 0.2
     n_warmdown_iters: int = 0
     val_loss_every: int = 125
     val_tokens: int = 10485760
