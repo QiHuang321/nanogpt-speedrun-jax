@@ -312,15 +312,29 @@ class Optimizer(NamedTuple):
 
 
 def get_lr(it, n_warmup_iters, n_warmdown_iters, n_train_iters):
+    # Warmup-stable-decay (WSD / "trapezoid") learning-rate schedule.
+    #
+    # Returns a multiplier on each optimizer's base_lr; the stable plateau is
+    # exactly 1.0, so the *peak* learning rate is unchanged. The shape is:
+    #   * linear warmup  0.0 -> 1.0  over the first `n_warmup_iters` steps,
+    #   * stable plateau 1.0         through the middle of the run,
+    #   * linear decay   1.0 -> 0.0  over the final `n_warmdown_iters` steps.
+    # When the warmup/decay lengths are left unset (<= 0) we fall back to
+    # canonical WSD fractions of the total run so the schedule is always a real
+    # trapezoid rather than degenerating to a constant LR.
+    if n_warmup_iters <= 0:
+        n_warmup_iters = max(1, round(0.02 * n_train_iters))
+    if n_warmdown_iters <= 0:
+        n_warmdown_iters = max(1, round(0.20 * n_train_iters))
     warmup_lr = (it + 1) / n_warmup_iters
-    constant_lr = 1.0
-    warmdown_lr = (n_train_iters - it) / n_warmdown_iters * (1.0 - 0.1) + 0.1
+    stable_lr = 1.0
+    decay_lr = (n_train_iters - it) / n_warmdown_iters
     lr = jnp.where(
         it < n_warmup_iters,
         warmup_lr,
-        jnp.where(it < n_train_iters - n_warmdown_iters, constant_lr, warmdown_lr),
+        jnp.where(it < n_train_iters - n_warmdown_iters, stable_lr, decay_lr),
     )
-    return lr
+    return jnp.clip(lr, 0.0, 1.0)
 
 
 def adam(
