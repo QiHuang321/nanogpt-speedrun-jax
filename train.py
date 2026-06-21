@@ -213,8 +213,12 @@ class Config:
 
     # iteration handling
     n_train_iters: int = 1675
-    n_warmup_iters: int = 0
-    f_warmdown_iters: float = 0.0
+    # Warmup-stable-decay (trapezoid) LR schedule: linear warmup to the peak LR,
+    # a stable plateau at the peak, then a linear decay. Peak LR is unchanged
+    # (the schedule multiplier plateaus at 1.0, so each optimizer still hits its
+    # base_lr). get_lr implements the three phases.
+    n_warmup_iters: int = 100
+    f_warmdown_iters: float = 0.4
     n_warmdown_iters: int = 0
     val_loss_every: int = 125
     val_tokens: int = 10485760
