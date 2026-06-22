@@ -699,7 +699,12 @@ def init_params(config: Config, mesh: Mesh) -> PyTree:
             (3 * config.d_model, config.d_model),
             (0.75 / config.d_model) ** 0.5,
         )
-        block_params["attn"]["c_proj"] = sharded_zeros((config.d_model, config.d_model))
+        # Small-scale normal init for the attention output projection
+        # (replaces zero-init) so the residual branch starts with a small but
+        # nonzero contribution.
+        block_params["attn"]["c_proj"] = sharded_normal(
+            next(key), (config.d_model, config.d_model), 0.02
+        )
         block_params["attn"]["lamb"] = jnp.array(0.5, dtype=config.dtype)
         block_params["attn"]["scale"] = jnp.array(0.12, dtype=config.dtype)
         block_params["mlp"] = dict()
@@ -708,8 +713,10 @@ def init_params(config: Config, mesh: Mesh) -> PyTree:
             (config.d_model, 4 * config.d_model),
             (0.75 / config.d_model) ** 0.5,
         )
-        block_params["mlp"]["c_proj"] = sharded_zeros(
-            (4 * config.d_model, config.d_model)
+        # Small-scale normal init for the MLP output projection
+        # (replaces zero-init), matching the attention output projection above.
+        block_params["mlp"]["c_proj"] = sharded_normal(
+            next(key), (4 * config.d_model, config.d_model), 0.02
         )
         lambdas_arr = jnp.array([1.0, 0.0], dtype=config.dtype)
         block_params["lambdas"] = jax.device_put(lambdas_arr, weight_sharding)
