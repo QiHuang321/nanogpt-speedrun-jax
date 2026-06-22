@@ -378,11 +378,15 @@ def zeropower_via_newtonschulz5(G, steps, eps):
 
     def _update_loop(X):
         a, b, c = (3.4445, -4.7750, 2.0315)
-        for i in range(steps):
+
+        def _ns_step(i, X):
             A = X @ X.T
             B = b * A + c * (A @ A)
-            X = a * X + B @ X
-        return X
+            return a * X + B @ X
+
+        # fori_loop (vs. a Python for-loop) lets `steps` be a traced value so
+        # the iteration count can adapt to the training step.
+        return fori_loop(0, steps, _ns_step, X)
 
     def tall_case(g):
         X = g.T.astype(jnp.bfloat16)
@@ -423,6 +427,13 @@ def muon(
         momentum = warmup_momentum_init + frac * (
             warmup_momentum_final - warmup_momentum_init
         )
+        # Adapt the Newton-Schulz iteration count to the training step: use
+        # fewer iterations early (gradients are noisy, so precise
+        # orthogonalization matters less) and ramp linearly up to ns_iters.
+        progress = jnp.clip(step / max(n_train_iters - 1, 1), 0.0, 1.0)
+        ns_steps = jnp.clip(
+            jnp.round(1.0 + progress * (ns_iters - 1)).astype(jnp.int32), 1, ns_iters
+        )
         new_m = tree_map(
             lambda m, g: (m + (1 - momentum).astype(m.dtype) * (g - m)).astype(m.dtype),
             state["m"],
@@ -433,7 +444,7 @@ def muon(
             g_nesterov = g + momentum.astype(m.dtype) * (m - g)
             update = (
                 lr.astype(p.dtype)
-                * zeropower_via_newtonschulz5(g_nesterov, ns_iters, eps).astype(p.dtype)
+                * zeropower_via_newtonschulz5(g_nesterov, ns_steps, eps).astype(p.dtype)
                 * jnp.sqrt(jnp.maximum(1.0, g.shape[0] / g.shape[1])).astype(p.dtype)
             )
             return p - update
