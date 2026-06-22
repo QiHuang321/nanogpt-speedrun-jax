@@ -216,7 +216,7 @@ class Config:
     # Learning-rate schedule: warmup-stable-decay (trapezoid). Warmup and decay
     # lengths are fractions of n_train_iters; the middle holds at the peak LR.
     f_warmup_iters: float = 0.05
-    n_warmup_iters: int = 0
+    n_warmup_iters: int = 100
     f_warmdown_iters: float = 0.2
     n_warmdown_iters: int = 0
     val_loss_every: int = 125
@@ -286,9 +286,13 @@ class Config:
         object.__setattr__(self, "mesh_shape", (jax.device_count(),))
         assert self.batch_size % self.micro_batch_size == 0
 
-        object.__setattr__(
-            self, "n_warmup_iters", int(self.n_train_iters * self.f_warmup_iters)
-        )
+        # n_warmup_iters is an explicit absolute step count (warmup over the
+        # first n_warmup_iters steps); fall back to the f_warmup_iters fraction
+        # only when it is left at 0.
+        if not self.n_warmup_iters:
+            object.__setattr__(
+                self, "n_warmup_iters", int(self.n_train_iters * self.f_warmup_iters)
+            )
         object.__setattr__(
             self, "n_warmdown_iters", int(self.n_train_iters * self.f_warmdown_iters)
         )
