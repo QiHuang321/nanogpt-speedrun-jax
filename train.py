@@ -261,6 +261,7 @@ class Config:
     muon_warmup_momentum_init: float = 0.85
     muon_warmup_momentum_final: float = 0.95
     muon_ns_iters: int = 2
+    muon_ns_iters_start: int = 1
     muon_eps: float = 1e-7
 
     # adam for non-matrices
@@ -378,11 +379,15 @@ def zeropower_via_newtonschulz5(G, steps, eps):
 
     def _update_loop(X):
         a, b, c = (3.4445, -4.7750, 2.0315)
-        for i in range(steps):
+
+        def _body(i, X):
             A = X @ X.T
             B = b * A + c * (A @ A)
-            X = a * X + B @ X
-        return X
+            return a * X + B @ X
+
+        # steps may be a traced (per-step adaptive) int, so use fori_loop
+        # rather than a Python range() which would require a static count.
+        return fori_loop(0, steps, _body, X)
 
     def tall_case(g):
         X = g.T.astype(jnp.bfloat16)
@@ -408,6 +413,7 @@ def muon(
     n_warmdown_iters: int,
     n_train_iters: int,
     ns_iters: int,
+    ns_iters_start: int,
     eps: float,
 ):
 
@@ -429,11 +435,19 @@ def muon(
             grads,
         )
 
+        # Adaptive Newton-Schulz iteration count: linearly ramp from
+        # ns_iters_start (fewer, used early in training) to the full ns_iters,
+        # over the course of training.
+        progress = jnp.minimum(step / jnp.maximum(n_train_iters, 1), 1.0)
+        ns_steps = jnp.round(
+            ns_iters_start + (ns_iters - ns_iters_start) * progress
+        ).astype(jnp.int32)
+
         def _update_leaf(g, p, m):
             g_nesterov = g + momentum.astype(m.dtype) * (m - g)
             update = (
                 lr.astype(p.dtype)
-                * zeropower_via_newtonschulz5(g_nesterov, ns_iters, eps).astype(p.dtype)
+                * zeropower_via_newtonschulz5(g_nesterov, ns_steps, eps).astype(p.dtype)
                 * jnp.sqrt(jnp.maximum(1.0, g.shape[0] / g.shape[1])).astype(p.dtype)
             )
             return p - update
@@ -778,6 +792,7 @@ def init_optimizer(config: Config, params: PyTree, mesh: Mesh):
         config.n_warmdown_iters,
         config.n_train_iters,
         config.muon_ns_iters,
+        config.muon_ns_iters_start,
         config.muon_eps,
     )
 
