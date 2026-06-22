@@ -251,7 +251,7 @@ class Config:
     adam_embed_beta2: float = 0.95
 
     # adam for lm head
-    adam_lm_head_base_lr: float = 0.008
+    adam_lm_head_base_lr: float = 0.004
     adam_lm_head_beta1: float = 0.9
     adam_lm_head_beta2: float = 0.95
 
