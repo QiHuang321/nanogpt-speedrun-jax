@@ -312,15 +312,25 @@ class Optimizer(NamedTuple):
 
 
 def get_lr(it, n_warmup_iters, n_warmdown_iters, n_train_iters):
-    warmup_lr = (it + 1) / n_warmup_iters
-    constant_lr = 1.0
-    warmdown_lr = (n_train_iters - it) / n_warmdown_iters * (1.0 - 0.1) + 0.1
-    lr = jnp.where(
-        it < n_warmup_iters,
-        warmup_lr,
-        jnp.where(it < n_train_iters - n_warmdown_iters, constant_lr, warmdown_lr),
+    # Warmup-stable-decay (trapezoid) schedule, normalized to a peak multiplier
+    # of 1.0 so the peak LR equals each optimizer's base_lr (unchanged from the
+    # previous schedule). Linear warmup up to the peak, a stable plateau held at
+    # the peak, then a linear decay back down to zero over the tail of training.
+    # When the config leaves the phase lengths unset, default them to fractions
+    # of the run so the trapezoid is active.
+    warmup = n_warmup_iters if n_warmup_iters > 0 else max(1, int(0.05 * n_train_iters))
+    warmdown = (
+        n_warmdown_iters if n_warmdown_iters > 0 else max(1, int(0.2 * n_train_iters))
     )
-    return lr
+    warmup_lr = (it + 1) / warmup
+    stable_lr = 1.0
+    warmdown_lr = (n_train_iters - it) / warmdown
+    lr = jnp.where(
+        it < warmup,
+        warmup_lr,
+        jnp.where(it < n_train_iters - warmdown, stable_lr, warmdown_lr),
+    )
+    return jnp.clip(lr, 0.0, 1.0)
 
 
 def adam(
