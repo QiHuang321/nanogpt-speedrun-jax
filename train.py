@@ -701,7 +701,10 @@ def init_params(config: Config, mesh: Mesh) -> PyTree:
     params["wte"] = sharded_normal(next(key), (config.vocab_size, config.d_model), 1.0)
     params["h"] = []
     params["skip_weights"] = sharded_ones(config.n_layers // 2)
-    params["lm_head"] = sharded_zeros((config.d_model, config.vocab_size))
+    # Tied embeddings: the output projection reuses wte (transposed) rather than
+    # a dedicated lm_head matrix, so there is a single shared weight that gets
+    # gradients from both the embedding lookup and the logit projection.
+    # See gpt_forward for the tied use.
 
     for i in range(config.n_layers):
         block_params = dict()
@@ -871,7 +874,9 @@ def gpt_forward(params, idx, precomputed_params, config):
             params["h"][n_encoder_layers + i], x, v1, x0, cos, sin, config
         )
     x = rms_norm(x, config)
-    logits = linear(x, params["lm_head"])
+    # Weight tying: project with the transpose of the token embedding (wte)
+    # instead of a separate lm_head parameter.
+    logits = linear(x, params["wte"].T)
     logits = (2.0 * config.logit_softcap) * jax.nn.sigmoid(
         logits / (config.logit_softcap / 2.0)
     )
