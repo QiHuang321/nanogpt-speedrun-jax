@@ -698,10 +698,12 @@ def init_params(config: Config, mesh: Mesh) -> PyTree:
     key = map(partial(jax.random.fold_in, root_key), itertools.count())
 
     params = dict()
+    # Token embedding. The output head is tied to this matrix: logits are
+    # computed as x @ wte.T in gpt_forward, so no separate lm_head weight is
+    # allocated and both paths' gradients accumulate into wte.
     params["wte"] = sharded_normal(next(key), (config.vocab_size, config.d_model), 1.0)
     params["h"] = []
     params["skip_weights"] = sharded_ones(config.n_layers // 2)
-    params["lm_head"] = sharded_zeros((config.d_model, config.vocab_size))
 
     for i in range(config.n_layers):
         block_params = dict()
@@ -871,7 +873,9 @@ def gpt_forward(params, idx, precomputed_params, config):
             params["h"][n_encoder_layers + i], x, v1, x0, cos, sin, config
         )
     x = rms_norm(x, config)
-    logits = linear(x, params["lm_head"])
+    # Tied output head: reuse the token-embedding matrix (wte) transposed as
+    # the unembedding projection instead of a dedicated lm_head weight.
+    logits = linear(x, params["wte"].T)
     logits = (2.0 * config.logit_softcap) * jax.nn.sigmoid(
         logits / (config.logit_softcap / 2.0)
     )
