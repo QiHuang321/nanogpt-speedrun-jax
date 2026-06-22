@@ -276,6 +276,10 @@ class Config:
     logit_softcap: float = 15.0
     rope_base: float = 1024
     vocab_size: int = 50304
+    # Tie the token embedding (wte) and the output projection (lm_head): when
+    # True there is a single shared weight and logits are computed as x @ wte.T.
+    # When False the two matrices are independent (lm_head is its own param).
+    tie_embeddings: bool = True
     dtype: str = "bfloat16"
 
     # sharding
@@ -701,7 +705,10 @@ def init_params(config: Config, mesh: Mesh) -> PyTree:
     params["wte"] = sharded_normal(next(key), (config.vocab_size, config.d_model), 1.0)
     params["h"] = []
     params["skip_weights"] = sharded_ones(config.n_layers // 2)
-    params["lm_head"] = sharded_zeros((config.d_model, config.vocab_size))
+    if not config.tie_embeddings:
+        # Untied: lm_head is a separate (zero-initialized) output projection.
+        # When tied we reuse wte.T in gpt_forward, so no lm_head param exists.
+        params["lm_head"] = sharded_zeros((config.d_model, config.vocab_size))
 
     for i in range(config.n_layers):
         block_params = dict()
@@ -871,7 +878,10 @@ def gpt_forward(params, idx, precomputed_params, config):
             params["h"][n_encoder_layers + i], x, v1, x0, cos, sin, config
         )
     x = rms_norm(x, config)
-    logits = linear(x, params["lm_head"])
+    # Tied embeddings reuse the transposed token embedding as the output
+    # projection; untied uses the dedicated lm_head matrix.
+    lm_head = params["wte"].T if config.tie_embeddings else params["lm_head"]
+    logits = linear(x, lm_head)
     logits = (2.0 * config.logit_softcap) * jax.nn.sigmoid(
         logits / (config.logit_softcap / 2.0)
     )
