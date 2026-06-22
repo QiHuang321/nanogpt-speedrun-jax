@@ -213,8 +213,11 @@ class Config:
 
     # iteration handling
     n_train_iters: int = 1675
+    # Learning-rate schedule: warmup-stable-decay (trapezoid). Warmup and decay
+    # lengths are fractions of n_train_iters; the middle holds at the peak LR.
+    f_warmup_iters: float = 0.05
     n_warmup_iters: int = 0
-    f_warmdown_iters: float = 0.0
+    f_warmdown_iters: float = 0.2
     n_warmdown_iters: int = 0
     val_loss_every: int = 125
     val_tokens: int = 10485760
@@ -284,6 +287,9 @@ class Config:
         assert self.batch_size % self.micro_batch_size == 0
 
         object.__setattr__(
+            self, "n_warmup_iters", int(self.n_train_iters * self.f_warmup_iters)
+        )
+        object.__setattr__(
             self, "n_warmdown_iters", int(self.n_train_iters * self.f_warmdown_iters)
         )
         assert self.d_model % self.n_heads == 0
@@ -312,15 +318,21 @@ class Optimizer(NamedTuple):
 
 
 def get_lr(it, n_warmup_iters, n_warmdown_iters, n_train_iters):
-    warmup_lr = (it + 1) / n_warmup_iters
-    constant_lr = 1.0
-    warmdown_lr = (n_train_iters - it) / n_warmdown_iters * (1.0 - 0.1) + 0.1
+    # Warmup-stable-decay (trapezoid) schedule, returned as a multiplier of the
+    # peak (base) LR. Peak is unchanged: the stable plateau multiplier is 1.0.
+    #   - warmup: linearly ramp 0 -> 1 over the first n_warmup_iters steps
+    #   - stable: hold at the peak (1.0) through the middle of training
+    #   - decay:  linearly ramp 1 -> 0 over the final n_warmdown_iters steps
+    # The jnp.maximum(..., 1) guards keep the expression well-defined when a
+    # phase is configured to zero length (that phase is then never selected).
+    warmup_lr = (it + 1) / jnp.maximum(n_warmup_iters, 1)
+    warmdown_lr = (n_train_iters - it) / jnp.maximum(n_warmdown_iters, 1)
     lr = jnp.where(
         it < n_warmup_iters,
         warmup_lr,
-        jnp.where(it < n_train_iters - n_warmdown_iters, constant_lr, warmdown_lr),
+        jnp.where(it < n_train_iters - n_warmdown_iters, 1.0, warmdown_lr),
     )
-    return lr
+    return jnp.clip(lr, 0.0, 1.0)
 
 
 def adam(
